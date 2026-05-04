@@ -1,62 +1,71 @@
-# Tesla Sync Node 🚗⚡
+BatMon | Pico 2W Battery & IO Monitor
+BatMon is a specialized firmware for the Raspberry Pi Pico 2W (RP2350) designed to monitor marine or vehicle battery systems. It provides a real-time web interface, MQTT telemetry, and persistent configuration storage.
 
-An intelligent BLE tracking node built for the **Raspberry Pi Pico 2 W**. This project monitors the RSSI (Signal Strength) of a Tesla vehicle to determine if it is approaching or leaving a garage, allowing for smart home automation triggers.
+🚀 Key Features
+Real-Time Dashboard: High-frequency updates via Server-Sent Events (SSE).
 
-## Key Features
-- **High-Frequency BLE Scanning:** Real-time tracking of Tesla BLE advertisements.
-- **Gaussian Weighted Trend Analysis:** Uses a Gaussian-weighted linear regression to calculate signal slope. This filters out RSSI "jitter" while remaining highly responsive to movement.
-- **Web Dashboard:** A live, browser-based dashboard served directly from the Pico using Server-Sent Events (SSE).
-- **Event Logging:** Automatic timestamped logs of state changes (Stationary -> Approaching -> Connected).
+Dynamic Web Config: Full management of WiFi, MQTT, and IO mapping via /config.
 
-Device Discovery & API Integration
-This node is designed to minimize expensive API calls to the Tesla Developer Portal by using local BLE intelligence.
+Persistent Flash Storage: Settings are stored in the RP2350’s non-volatile memory (Flash) as a JSON string.
 
-1. Smart Target Acquisition
-The system allows for flexible provisioning via the local web interface. You can configure a target in two ways:
+Scalable Monitoring:
 
-BLE Name: The node scans for the specific Tesla broadcast name (e.g., SblenameofteslaC).
+3 Analog Channels: Optimized for voltage monitoring with configurable ratios.
 
-MAC Address: You can provide a direct hardware MAC address for faster locking.
+12 Digital PIO Pins: Real-time state tracking for switches or bilge pumps.
 
-The Discovery Flow: If a Name is provided, the node will actively scan all nearby BLE advertisements. Once a name match is found, the system automatically resolves the hardware MAC Address, stores it in Flash memory, and switches the tracking target to that MAC for increased performance and reliability.
+MQTT Integration: Native support for IoT brokers like Home Assistant.
 
-2. Tesla Developer API Brokering
-While this node handles the local "heavy lifting" of distance tracking, it is designed to communicate with a Middleware Web Server.
+🛠 Hardware Configuration
+Component	Description
+MCU	Raspberry Pi Pico 2W (RP2350)
+Analog Inputs	ADC0, ADC1, ADC2 (GPIO 26-28)
+Digital IO	12 Pins via PIO (Configurable)
+Voltage Dividers	External 10kΩ/47kΩ resistors suggested for 12V/24V systems
+📂 Project Structure
+Plaintext
+├── webserver.c    # lwIP TCP server, POST/GET handlers, SSE logic
+├── flash.c        # RP2350 Flash erase/program logic for settings
+├── system_info.c  # CPU temperature and telemetry data
+├── html/          # UI source files (Embedded as Raw HTML strings)
+└── CMakeLists.txt # Pico SDK build configuration
+⚙️ Installation & Build
+Clone the Repository:
 
-Reduced Overhead: Instead of constant polling, the Pico only triggers the middleware when the Gaussian Trend confirms a high-confidence "Arrival" or "Departure" event.
+Bash
+git clone https://github.com/srrobicheaux/pico2w_mqtt_webserver_demo.git
+cd pico2w_mqtt_webserver_demo
+Build:
 
-JSON Response: The node can be configured to pull target updates from a remote endpoint. It expects a JSON payload format: {"BLE": "YourTeslaNameOrMAC"}.
-
-3. Automated Triggers (Roadmap)
-Future updates will utilize the validated trend data to automate vehicle commands (e.g., pre-conditioning, garage door opening, or charging start) by sending secure handshake requests to the Tesla API broker only when the vehicle crosses specific RSSI slope thresholds.
-
-## Hardware Requirements
-- Raspberry Pi Pico 2 W (or Pico W)
-- A Tesla Vehicle with Phone Key / BLE enabled
-
-## Software Setup
-
-### 1. Secrets Management
-Create a `secrets.h` file in the root directory (this file is ignored by Git for security):
-```cpp
-#ifndef SECRETS_H
-#define SECRETS_H
-
-//I have a web server brokering calls to Tesla Developer API.
-//This is not required, but you must fill in a BLE MAC or BLE Name on the provisioniong website.
-//Eventually this code will trigger calls to Tesla to confirm that the car is arriving or departing. This code helps reduce those calls to a bare minimum.
-//It responds with a JSON packet that contains {"BLE":"SblenameofteslaC"}.
-//The name is then stored to flash as a target. WHen the BLE MAC is discovered the target is changed to the MAC String. You can configure the provisionoing website with a BLE Name or MAC String. If blank it will try the website configured.
-//As such you might find it useful to have this code pull from a website the BLE Name.
+Bash
+mkdir build && cd build
+cmake ..
+make
 
 
-#define AZURE_HOST "YOURSERVERHERE.azurewebsites.net"
-#define PHP_PATH "/YOURPHPHERE.php"
+3.  **Flash**:
+    Deploy the `BatMon.uf2` file to your Pico 2W using **BOOTSEL** mode.
 
-//actually these are option. You can use the provisioning service to setup WiFi.
-//The captive portal wont work with apple devices.
-//Just go to website 192.168.4.1 once you have joing the pico's Access Point
-#define WIFI_SSID "Your_WiFi_Name"
-#define WIFI_PASSWORD "Your_WiFi_Password"
+## 🔧 Setup & Usage
 
-#endif
+### 1. Network Connection
+On first boot, the device will attempt to connect using the default credentials. If unsuccessful, it will initialize in **Provisioning Mode**.
+
+### 2. Configuration
+Navigate to `http://<pico-ip>/config` to:
+*   Set **WiFi SSID** and **MQTT Broker** details.
+*   Name your Battery Banks and assign **Ratios** for calibration.
+*   Enable/Disable **Digital Pins** and set their direction (Input/Output).
+
+### 3. Home Assistant Integration
+The device publishes state changes to your MQTT broker. You can add sensors to your `configuration.yaml` using the JSON attributes provided by the `/settings` endpoint.
+
+## 📝 License
+This project is licensed under the MIT License.
+
+---
+
+### Pro-Tip for your Repo:
+Since you've already pushed your code, you can create this file directly on GitHub by clicking the **"Add file"** button -> **"Create new file"** and naming it `README.md`. Paste the content above, and it will automatically render on your repository's main page.
+
+Is there anything specific about the wiring or the 40kHz transducer array you'd like to add as a "Hardware" sub-section?
