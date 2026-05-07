@@ -171,10 +171,8 @@ void ha_add_info(char *value, char *class, char *Units, char *dev_json) {
     device_id, value,
     device_id, 
     dev_json);
-
     //printf("Publishing HA Discovery for %s:\nTopic: %s\nPayload: %s\n", value, topic, payload);
     // Use the wrapper we discussed earlier to send to the raw topic
-
     _mqtt_manager_publish(topic, payload, true, true);
 }
 
@@ -186,8 +184,6 @@ void ha_add_sensor(int pin,char *dev_json) {
 
     // Needs to be: homeassistant/switch/<device_id>/<object_id>/config
     snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s_sensor_%d/config", device_id,device_id, pin);
-
-
     snprintf(payload, sizeof(payload),
     "{"
       "\"platform\": \"sensor\","
@@ -195,9 +191,9 @@ void ha_add_sensor(int pin,char *dev_json) {
       "\"device_class\": \"voltage\","
       "\"state_class\": \"measurement\","
       "\"unit_of_measurement\": \"V\","
-      "\"state_topic\": \"%s/analog\","
+      "\"state_topic\": \"%s/IO\","
       "\"suggested_display_precision\": 2,"
-      "\"value_template\": \"{{value_json[%d].value}}\","
+      "\"value_template\": \"{{value_json.analog[%d]}}\","
       "\"expire_after\": 120,"
       "\"unique_id\": \"%s_analog_%d\","
       "\"availability_topic\": \"%s/status\","
@@ -273,6 +269,8 @@ static void ha_publish_discovery(char *data){
     ha_add_info("uptime", "duration", "s", dev_json) ;
 
     for (int i = 0; i < 3; i++) {
+   //     IO_settings.analogs[i].name
+//        ha_add_sensor(i,dev_json, "voltage", "V"); 
         ha_add_sensor(i,dev_json); 
                 cyw43_arch_poll(); // This is required in poll mode
 
@@ -377,6 +375,9 @@ static void dns_found_cb(const char *hostname, const ip_addr_t *ipaddr, void *ar
 
 void mqtt_manager_start()
 {
+    static bool started = false;
+    if (started && !state->connect_done)        return;
+    started = true;
     if (state->mqtt_client_inst)
     {
         printf("MQTT Client already running. Restarting with new settings (but disconnect is wankie!)...\n");

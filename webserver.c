@@ -5,13 +5,12 @@
 #include "html.dashboard.h"
 #include "html.wifiform.h"
 #include "html.wifisuccess.h"
-
 #include "system_info.h"
 
 #define HTTP_PORT 80
-// #define DEBUG 1
 
-// DeviceSettings *settings;
+#define RESPOND_NOT_FOUND "<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>404 - File Not Found</h1></body></html>"
+#define RESPOND_SSE "data: {\"trend\":\"STARTED\",\"uptime\":0}\r\n\r\n"
 
 // other responses defined n the html files
 #define RESPOND_NOT_FOUND "<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>404 - File Not Found</h1></body></html>"
@@ -46,11 +45,10 @@
     "Content-Type: text/html; charset=utf-8\r\n" \
     "Content-Length: %d\r\n\r\n"
 
-// SSE clients (simple single-client for now – extend to list if needed)
 static struct tcp_pcb *sse_client = NULL;
-// confusing global parameter needs to be eliminatged
-static bool provisioning;
-static volatile bool in_recv_handler = false; // ← prevents overlapping calls
+static bool provisioning = false;
+static volatile bool in_recv_handler = false;
+static char response_buffer[2048];  // Increased for full settings JSON
 
 static err_t http_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
@@ -143,87 +141,60 @@ static void http_err_cb(void *arg, err_t err)
     }
 }
 
-static char response_buffer[1024] = {0}; // increased size
-// ──────────────────────────────────────────────────────────────
-// Main callback - heavily improved
 static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
-    if (in_recv_handler)
-    { // ← re-entrancy guard
-        pbuf_free(p);
+    if (in_recv_handler || p == NULL) {
+        if (p) pbuf_free(p);
         return ERR_OK;
     }
     in_recv_handler = true;
 
-    if (p == NULL)
-    {
-        in_recv_handler = false;
-        return ERR_BUF;
-    }
-
-    if (err != ERR_OK)
-    {
-        printf("HTTP error:%d\n", err);
-        if (tpcb == sse_client)
-            sse_client = NULL;
-        pbuf_free(p);
-        in_recv_handler = false;
-        return ERR_RST;
-    }
-
     tcp_recved(tpcb, p->tot_len);
 
-    // Use a larger static request buffer (safe for typical browser requests)
     static char req[2048];
-    req[0] = '\0';
-
     int length = MIN(p->len, sizeof(req) - 1);
     memcpy(req, p->payload, length);
     req[length] = '\0';
 
-    // ───── Local buffers for this request (eliminates most races) ─────
     char header_buffer[512] = {0};
     char *header = header_buffer;
     char *response = response_buffer;
 
-    // ───── POST handling (cleaner state machine) ─────
-    static bool responding = false;
+    // POST handler
+    if (strncmp(req, "POST /save_settings", 19) == 0) {
+        printf("Saving settings from web UI...\n");
+        
+        char *body = strstr(req, "\r\n\r\n");
+        if (body) body += 4;
 
-    if (responding || req[0] == 'P')
-    {
-        char posted[512] = {0};
-        char *body = responding ? req : (strstr(req, "\r\n\r\n") ? strstr(req, "\r\n\r\n") + 4 : req);
-        responding = true;
+        DeviceSettings settings;
+        load_settings(&settings);           // load current
 
-        if (strncmp(req, "POST /save_settings", 19) == 0)
-        {
-            printf("Processing JSON Settings Save...\n");
-//###############################################################################
-            // For JSON, we do NOT use url_decode. We save the raw body.
-           // save_settings_to_flash(body);
-
-            // Respond with Success JSON
-            header = HEADER_JSON;
-            response = "{\"status\":\"ok\"}";
+        if (json_to_settings(body, &settings)) {
+            save_settings(&settings);
+            response = "{\"status\":\"ok\",\"message\":\"Settings saved. Rebooting...\"}";
+            printf("Settings saved successfully.\n");
+            // Optional: reboot_device(); after a short delay
+        } else {
+            response = "{\"status\":\"error\",\"message\":\"Failed to parse settings\"}";
         }
-        else
-        {
-            url_decode(posted, sizeof(posted), body);
 
-            responding = false;
-
-            if (provisioning) // && settings->wifi.ssid[0] != '\0'
-            {
-                provisioning = false;
-                response = RESPOND_SUCCESS; // you have this defined somewhere
-            }
-            else
-            {
-                response = RESPOND_DASHBOARD;
-            }
-        }
+        header = HEADER_JSON;
+        snprintf(header_buffer, sizeof(header_buffer), HEADER_JSON, strlen(response));
+        header = header_buffer;
     }
-    // ───── GET handling (clean switch + local buffers) ─────
+    // GET /settings
+    else if (strncmp(req, "GET /settings ", 14) == 0) {
+        printf("Serving full settings JSON\n");
+        DeviceSettings s;
+        load_settings(&s);
+
+        int len = settings_to_json(&s, response_buffer, sizeof(response_buffer));
+        
+        snprintf(header_buffer, sizeof(header_buffer), HEADER_JSON, len);
+        header = header_buffer;
+        response = response_buffer;
+    }
     else if (req[0] == 'G')
     {
         switch (req[5])
@@ -338,34 +309,22 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     }
 
     // Fallback 404
-    if (response[0] == '\0')
-    {
+    if (response[0] == '\0') {
         header = HEADER_NOT_FOUND;
         response = RESPOND_NOT_FOUND;
     }
 
-    // Add Content-Length if needed
-    if (strstr(header, "Content-Length:") != NULL)
-    {
-        snprintf(header_buffer, sizeof(header_buffer), header, strlen(response));
-        header = header_buffer;
-    }
-
-    // ───── Send response safely ─────
+    // Send response (your existing send logic)
     cyw43_arch_lwip_begin();
-
     tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-    if (response && response[0])
-    {
+    if (response && response[0]) {
         tcp_write(tpcb, response, strlen(response), TCP_WRITE_FLAG_COPY);
     }
     tcp_output(tpcb);
-
     cyw43_arch_lwip_end();
 
     pbuf_free(p);
     in_recv_handler = false;
-
     return ERR_OK;
 }
 
@@ -384,6 +343,7 @@ static struct tcp_pcb *listen_pcb = NULL;
 
 bool webserver_init(bool _provisioning)
 {
+    provisioning = _provisioning;
     static bool running = false;
     if (running)
         return true;
@@ -419,7 +379,6 @@ bool webserver_init(bool _provisioning)
     return true;
 }
 
-// In webserver.c
 
 void webserver_push_update(const char *topic, const char *json_payload)
 {

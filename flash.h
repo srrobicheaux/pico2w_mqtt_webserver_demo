@@ -8,36 +8,30 @@
 #include "mqtt_manager.h"
 #include "wifi_provisioning.h"
 
+#define SETTINGS_VERSION      0x0007
+#define FLASH_TARGET_OFFSET   (1536 * 1024UL)
+#define FLASH_SECTOR_SIZE     4096
+
 typedef struct {
-    uint16_t version;     
+    uint16_t version;
     mqtt_settings_t mqtt;
     wifi_t wifi;
     io_t IOs;
-
-    uint32_t position;     // Next VoltageLog index (circular buffer)
+    uint32_t position;
+    uint32_t crc32;
 } DeviceSettings;
 
 bool load_settings(DeviceSettings *settings);
-void save_settings(DeviceSettings *settings, size_t len);
+bool save_settings(const DeviceSettings *settings);
 
-// Voltage history functions
+int  settings_to_json(const DeviceSettings *s, char *buf, size_t bufsize);
+bool json_to_settings(const char *json, DeviceSettings *s);
+
 void save_voltage_log(const analog_log_t *log, DeviceSettings *settings);
 const analog_log_t *read_voltage_log(uint32_t position);
 
-/*
-// Hardware / watchdog helpers
-bool get_bootsel_button();
-void send_status_event(void (*notifer)(char *json, size_t size));
-void reset();
+bool get_bootsel_button_pressed(void);
+void factory_reset(void);
+void reboot_device(void);
 
-typedef enum {
-    GPIO_ACTION_READ = 0,
-    GPIO_ACTION_TOGGLE = 1,
-    GPIO_ACTION_PRESS = 2
-} gpio_action_t;
-
-// Update the function prototype
-bool pin_action(int pio, gpio_action_t action);
-
-*/
-#endif // FLASH_H
+#endif
