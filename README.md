@@ -62,10 +62,3 @@ The device publishes state changes to your MQTT broker. You can add sensors to y
 
 ## 📝 License
 This project is licensed under the MIT License.
-
----
-
-### Pro-Tip for your Repo:
-Since you've already pushed your code, you can create this file directly on GitHub by clicking the **"Add file"** button -> **"Create new file"** and naming it `README.md`. Paste the content above, and it will automatically render on your repository's main page.
-
-Is there anything specific about the wiring or the 40kHz transducer array you'd like to add as a "Hardware" sub-section?
