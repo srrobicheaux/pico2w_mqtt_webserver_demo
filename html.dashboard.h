@@ -66,7 +66,6 @@
         }
         .card-label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
         .card-value { font-size: 1.8rem; font-weight: 700; font-family: monospace; }
-        .card-sub { font-size: 0.8rem; color: var(--text-secondary); margin-top: 8px; display: flex; justify-content: space-between;}
 
         .gauge-container { width: 100%; max-width: 140px; margin: 5px auto 10px auto; }
         .gauge path.bg-arc { stroke: var(--border-color); }
@@ -104,7 +103,12 @@
             font-size: 0.75rem;
             font-weight: 600;
             font-family: monospace;
+            transition: all 0.2s ease;
         }
+
+        /* Hover styles for interactive pins */
+        .gpio-badge.clickable { cursor: pointer; }
+        .gpio-badge.clickable:hover { background: rgba(59, 130, 246, 0.15); border-color: var(--accent-blue); }
 
         @media (max-width: 900px) { .container { grid-template-columns: repeat(2, 1fr); } }
         @media (max-width: 600px) { 
@@ -140,42 +144,8 @@
             <div id="gpio-badges" style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px;"></div>
         </div>
 
-        <!-- Dynamic Battery Cards -->
-        <div class="card" id="card-1">
-            <div class="card-label" id="v1-label">B1</div>
-            <div class="gauge-container">
-                <svg viewBox="0 0 100 50" class="gauge">
-                    <path class="bg-arc" d="M 10 45 A 40 40 0 0 1 90 45" fill="none" stroke-width="6" stroke-linecap="round"/>
-                    <line class="needle" id="v1-needle" x1="50" y1="45" x2="50" y2="10" stroke-width="2" style="transform: rotate(-90deg);"/>
-                    <circle cx="50" cy="45" r="4" fill="var(--accent-red)"/>
-                </svg>
-            </div>
-            <div><span class="card-value" id="v1-val">--.--</span><span class="unit">V</span></div>
-        </div>
-
-        <div class="card" id="card-2">
-            <div class="card-label" id="v2-label">B2</div>
-            <div class="gauge-container">
-                <svg viewBox="0 0 100 50" class="gauge">
-                    <path class="bg-arc" d="M 10 45 A 40 40 0 0 1 90 45" fill="none" stroke-width="6" stroke-linecap="round"/>
-                    <line class="needle" id="v2-needle" x1="50" y1="45" x2="50" y2="10" stroke-width="2" style="transform: rotate(-90deg);"/>
-                    <circle cx="50" cy="45" r="4" fill="var(--accent-red)"/>
-                </svg>
-            </div>
-            <div><span class="card-value" id="v2-val">--.--</span><span class="unit">V</span></div>
-        </div>
-
-        <div class="card" id="card-3">
-            <div class="card-label" id="v3-label">B3</div>
-            <div class="gauge-container">
-                <svg viewBox="0 0 100 50" class="gauge">
-                    <path class="bg-arc" d="M 10 45 A 40 40 0 0 1 90 45" fill="none" stroke-width="6" stroke-linecap="round"/>
-                    <line class="needle" id="v3-needle" x1="50" y1="45" x2="50" y2="10" stroke-width="2" style="transform: rotate(-90deg);"/>
-                    <circle cx="50" cy="45" r="4" fill="var(--accent-red)"/>
-                </svg>
-            </div>
-            <div><span class="card-value" id="v3-val">--.--</span><span class="unit">V</span></div>
-        </div>
+        <!-- Dynamic Analog Cards Will Be Injected Here -->
+        <span id="analog-anchor" style="display: none;"></span>
 
         <div class="card full-width chart-container">
             <div class="card-label">Voltage History</div>
@@ -191,16 +161,20 @@
     let lastRateCheck = Date.now();
     let lastChartUpdate = 0;
     
+    // Global function to toggle PIO states
+    function togglePio(pioIndex) {
+        fetch(`/pio=${pioIndex}/toggle`)
+            .then(res => res.json())
+            .then(data => console.log(`Toggled PIO ${pioIndex}:`, data))
+            .catch(err => console.error(`Toggle error on PIO ${pioIndex}:`, err));
+    }
+
     const ctx = document.getElementById('voltageChart').getContext('2d');
     const chart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: Array(MAX_POINTS).fill(''),
-            datasets: [
-                { label: 'B1', borderColor: '#3b82f6', data: Array(MAX_POINTS).fill(null), borderWidth: 2, pointRadius: 0, tension: 0.3 },
-                { label: 'B2', borderColor: '#10b981', data: Array(MAX_POINTS).fill(null), borderWidth: 2, pointRadius: 0, tension: 0.3 },
-                { label: 'B3', borderColor: '#8b5cf6', data: Array(MAX_POINTS).fill(null), borderWidth: 2, pointRadius: 0, tension: 0.3 }
-            ]
+            datasets: [] // Start empty, populate via settings
         },
         options: {
             responsive: true, maintainAspectRatio: false, animation: false,
@@ -208,6 +182,9 @@
             plugins: { legend: { labels: { color: '#9ca3af' } } }
         }
     });
+
+    // Chart line colors to cycle through dynamically
+    const chartColors = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#06b6d4'];
 
     // --- LOAD SETTINGS ---
     fetch('./settings')
@@ -220,25 +197,74 @@
             if(data.wifi) document.getElementById('dev-id').textContent = 'ID: ' + data.wifi.dev_id;
 
             if(data.IOs) {
-                // Label Analogs
+                const aCount = data.IOs.analog_count || 0;
+                const pCount = data.IOs.pio_count || 0;
+
+                // Build Dynamic Analog Cards & Chart Datasets
                 if(data.IOs.analog) {
-                    data.IOs.analog.forEach((a, i) => {
-                        const label = document.getElementById(`v${i+1}-label`);
-                        if(label) label.textContent = a.name || `Analog ${i}`;
-                        if(chart.data.datasets[i]) chart.data.datasets[i].label = a.name || `B${i+1}`;
-                    });
-                    chart.update();
+                    let analogHtml = '';
+                    let newDatasets = [];
+                    let dSetColorIdx = 0;
+                    
+                    // Only loop up to the reported count
+                    for(let i = 0; i < aCount && i < data.IOs.analog.length; i++) {
+                        const a = data.IOs.analog[i];
+                        if(a && a.enabled) {
+                            const name = a.name || `Analog ${i}`;
+                            const color = chartColors[dSetColorIdx % chartColors.length];
+                            
+                            // Build Card UI
+                            analogHtml += `
+                            <div class="card">
+                                <div class="card-label">${name}</div>
+                                <div class="gauge-container">
+                                    <svg viewBox="0 0 100 50" class="gauge">
+                                        <path class="bg-arc" d="M 10 45 A 40 40 0 0 1 90 45" fill="none" stroke-width="6" stroke-linecap="round"/>
+                                        <line class="needle" id="v${i}-needle" x1="50" y1="45" x2="50" y2="10" stroke-width="2" style="transform: rotate(-90deg);"/>
+                                        <circle cx="50" cy="45" r="4" fill="var(--accent-red)"/>
+                                    </svg>
+                                </div>
+                                <div><span class="card-value" id="v${i}-val">--.--</span><span class="unit">V</span></div>
+                            </div>`;
+
+                            // Build Dataset. We save original index '_idx' so SSE knows where to put incoming array data
+                            newDatasets.push({
+                                label: name,
+                                borderColor: color,
+                                data: Array(MAX_POINTS).fill(null),
+                                borderWidth: 2, pointRadius: 0, tension: 0.3,
+                                _idx: i 
+                            });
+                            dSetColorIdx++;
+                        }
+                    }
+                    
+                    if(analogHtml) {
+                        // Insert dynamically rendered cards just before the anchor point
+                        document.getElementById('analog-anchor').insertAdjacentHTML('beforebegin', analogHtml);
+                        chart.data.datasets = newDatasets;
+                        chart.update();
+                    }
                 }
                 
                 // Build PIO Badges
                 if(data.IOs.pio) {
                     let html = '';
-                    data.IOs.pio.forEach((p, i) => {
-                        if(p.enabled) {
+                    
+                    // Only loop up to the reported count
+                    for(let i = 0; i < pCount && i < data.IOs.pio.length; i++) {
+                        const p = data.IOs.pio[i];
+                        if(p && p.enabled) {
                             const name = p.name || `P${i}`;
-                            html += `<div class="gpio-badge"><div class="dot" id="pio-dot-${i}"></div><span>${name}</span></div>`;
+                            
+                            // Check if set to 'in' (out == false)
+                            const isInput = (p.out === false);
+                            const clickAttr = isInput ? `onclick="togglePio(${i})" title="Toggle GPIO ${i}"` : `title="Output Pin"`;
+                            const badgeClass = isInput ? 'gpio-badge clickable' : 'gpio-badge';
+                            
+                            html += `<div class="${badgeClass}" ${clickAttr}><div class="dot" id="pio-dot-${i}"></div><span>${name}</span></div>`;
                         }
-                    });
+                    }
                     if(html) {
                         document.getElementById('gpio-badges').innerHTML = html;
                         document.getElementById('gpio-container').style.display = 'block';
@@ -272,20 +298,21 @@
                     });
                 }
 
-                // Handle Analog Array
+                // Handle Analog Array by matching dataset to incoming JSON index
                 if (data.IO.analog) {
-                    data.IO.analog.forEach((val, i) => {
-                        const num = i + 1;
-                        if (chart.data.datasets[i]) {
-                            chart.data.datasets[i].data.push(val);
-                            chart.data.datasets[i].data.shift();
-                        }
-                        
-                        const valEl = document.getElementById(`v${num}-val`);
-                        if (valEl) {
-                            valEl.textContent = val.toFixed(2);
-                            const angle = Math.max(-90, Math.min(90, (val / 16) * 180 - 90));
-                            document.getElementById(`v${num}-needle`).style.transform = `rotate(${angle}deg)`;
+                    chart.data.datasets.forEach((ds) => {
+                        const idx = ds._idx;
+                        if (idx !== undefined && data.IO.analog[idx] !== undefined) {
+                            const val = data.IO.analog[idx];
+                            ds.data.push(val);
+                            ds.data.shift();
+                            
+                            const valEl = document.getElementById(`v${idx}-val`);
+                            if (valEl) {
+                                valEl.textContent = val.toFixed(2);
+                                const angle = Math.max(-90, Math.min(90, (val / 16) * 180 - 90));
+                                document.getElementById(`v${idx}-needle`).style.transform = `rotate(${angle}deg)`;
+                            }
                         }
                     });
                 }

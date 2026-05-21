@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include "lwip/apps/mqtt.h"
 #include "wifi_provisioning.h"
+#include "system_info.h"
+#include "IOs.h"
 
 #ifndef MQTT_TOPIC_LEN
 #define MQTT_TOPIC_LEN 100
@@ -30,14 +32,14 @@ typedef struct {
     bool connect_done;
     int subscribe_count;
     bool stop_client;
+    mqtt_connection_status_t status;
 } MQTT_CLIENT_DATA_T;
 
-bool mqtt_manager_is_connected();
-int mqtt_settings_JSON(char *payload, size_t len);
-bool mqtt_init(wifi_t *_wifi_settings, mqtt_settings_t *_mqtt_settings, MQTT_CLIENT_DATA_T *state);
+bool mqtt_init(wifi_t *_wifi_settings, mqtt_settings_t *_mqtt_settings, MQTT_CLIENT_DATA_T * _state);
 
 // Change start to return void, we don't need to leak the state pointer anymore
-void mqtt_manager_start();
+void mqtt_manager_start(MQTT_CLIENT_DATA_T *state, mqtt_settings_t *mqtt_settings);
+
 // Change publish to drop the state argument (we renamed it to standard naming too)
-void mqtt_manager_publish(const char *topic, const char *data);
+void mqtt_manager_publish(MQTT_CLIENT_DATA_T *state, const char *topic, const char *data);
 #endif

@@ -45,29 +45,15 @@ bool wifi_provisioning_start()
     dns_server_init();
 
     printf("Provision url:\t");
-    cyw43_arch_lwip_end();
+//    cyw43_arch_lwip_end();
 
     return true;
 }
 
-int wifi_settings_JSON(char *payload, size_t len)
-{
-    return snprintf(payload, len, 
-                   "\"wifi\":{\"ssid\":\"%s\",\"net_name\":\"%s\",\"dev_id\":\"%s\"},",
-                   wifi_settings->ssid, wifi_settings->network_name, wifi_settings->device_id);
-}
-
 bool wifi_init(wifi_t *_wifi_settings)
 {
-    wifi_settings=_wifi_settings;
+   wifi_settings=_wifi_settings;
 
-    if (_wifi_settings->ssid[0] =='\0') {
-        //if ssid isnt set then assign defaults
-        printf("Using default:%s\t", SSID);
-        strncpy(_wifi_settings->ssid, SSID, 32);
-        strncpy(_wifi_settings->password, SSID_PW, 64);
-        snprintf(_wifi_settings->network_name, sizeof(_wifi_settings->network_name), "Pico%s", _wifi_settings->device_id);
-    }
     if (cyw43_arch_init())
     {
         printf("WiFi init failed\n\n");
@@ -78,15 +64,14 @@ bool wifi_init(wifi_t *_wifi_settings)
     // Set the hostname for DHCP requests
     struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
     netif_set_hostname(n, _wifi_settings->network_name);
+    printf("Attempting to connect to WiFi SSID: %s\t", _wifi_settings->ssid);
 
     int error = cyw43_arch_wifi_connect_timeout_ms(_wifi_settings->ssid, _wifi_settings->password, CYW43_AUTH_WPA3_WPA2_AES_PSK, 30000);
     if (error)
     {
+        printf("Failed to connect to %s. Error# %d\n", _wifi_settings->ssid, error);
         cyw43_arch_deinit();
         cyw43_arch_lwip_end();
-
-        printf("Failed to connect to %s. Error# %d\n", _wifi_settings->ssid, error);
-        wifi_provisioning_start();
         return false;
     }
 	else

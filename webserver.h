@@ -9,6 +9,6 @@
  * 
  * @return true on success, false on failure.
  */
-bool webserver_init(bool _provisioning);
+bool webserver_init(bool _provisioning, char * network_name);
 void webserver_push_update(const char *topic, const char *json_payload) ;
 #endif // WEBSERVER_H

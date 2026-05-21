@@ -54,7 +54,7 @@ static float read_onboard_temperature(const char unit)
     return -1.0f;
 }
 
-void send_system_status_event(char *payload)
+void load_status_JSON(char *payload)
 {
     float temperature = read_onboard_temperature(TEMPERATURE_UNITS);
     snprintf(payload, 256,

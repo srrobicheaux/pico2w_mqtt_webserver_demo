@@ -25,7 +25,7 @@ void IOs_JSON(char *payload, size_t len)
     {
         adc_select_input(i);
         v = adc_read() * cf * IOs->analogs[i].ratio + IOs->analogs[i].offset;
-        pos = pos + snprintf(pos, len, "%.2f,", v);
+        pos = pos + snprintf(pos, len, "%.1f,", v);
     }
     pos[-1] = ']';
 
@@ -135,7 +135,7 @@ int IOs_settings_JSON(char *payload, size_t max)
     pos += len;
     rem -= len;
 
-    return max-rem;
+    return max - rem;
 
     printf("Settings Payload: %s\n", payload); // Only works on the newest compilers
 }

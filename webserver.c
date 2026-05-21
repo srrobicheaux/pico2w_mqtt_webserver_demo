@@ -160,21 +160,27 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     char *header = header_buffer;
     char *response = response_buffer;
 
+    static bool posting = false;
+
     // POST handler
-    if (strncmp(req, "POST /save_settings", 19) == 0) {
-        printf("Saving settings from web UI...\n");
-        
+    if (strncmp(req, "POST /save_settings", 19) == 0 || posting) {
         char *body = strstr(req, "\r\n\r\n");
-        if (body) body += 4;
+        if (body) {body += 4;} else {body = req;}
+
+        if (!posting && body !=req) {
+            posting = true;
+            printf("Waiting for more POST data...\n");
+            in_recv_handler = false;
+            return ERR_OK; // Wait for the next packet
+        }
+        posting = false; // Reset for next time
 
         DeviceSettings settings;
-        load_settings(&settings);           // load current
 
         if (json_to_settings(body, &settings)) {
             save_settings(&settings);
-            response = "{\"status\":\"ok\",\"message\":\"Settings saved. Rebooting...\"}";
-            printf("Settings saved successfully.\n");
-            // Optional: reboot_device(); after a short delay
+            response = "{\"status\":\"ok\",\"message\":\"Settings saved.\"}";
+            printf("Settings Saved\n"); 
         } else {
             response = "{\"status\":\"error\",\"message\":\"Failed to parse settings\"}";
         }
@@ -186,10 +192,7 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     // GET /settings
     else if (strncmp(req, "GET /settings ", 14) == 0) {
         printf("Serving full settings JSON\n");
-        DeviceSettings s;
-        load_settings(&s);
-
-        int len = settings_to_json(&s, response_buffer, sizeof(response_buffer));
+        int len = settings_to_json_compact(response_buffer, sizeof(response_buffer));
         
         snprintf(header_buffer, sizeof(header_buffer), HEADER_JSON, len);
         header = header_buffer;
@@ -225,31 +228,10 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
             {
                 printf("Serving Settings JSON\n");
 
-                // We use a pointer to keep track of where we are writing in the buffer
-                char *p = response_buffer;
-                size_t rem = sizeof(response_buffer);
-                int len;
-                p[0] = '{';
-                p += 1;
-                rem -= 1;
 
-                // 1. Root and WiFi/MQTT info
-                len = wifi_settings_JSON(p, rem);
-                p += len;
-                rem -= len;
-                len = mqtt_settings_JSON(p, rem);
-                p += len;
-                rem -= len;
-                len = IOs_settings_JSON(p, rem);
-                p += len;
-                rem -= len;
+                settings_to_json_compact(response_buffer, sizeof(response_buffer));
 
-                // 4. Close JSON
-                len = snprintf(p, rem, "}");
-                p += len;
-                rem -= len;
-
-                int total_json_len = p - response_buffer;
+                int total_json_len = strlen(response_buffer);
 
                 snprintf(header_buffer, sizeof(header_buffer), HEADER_JSON, total_json_len);
                 header = header_buffer;
@@ -341,7 +323,7 @@ static err_t http_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 
 static struct tcp_pcb *listen_pcb = NULL;
 
-bool webserver_init(bool _provisioning)
+bool webserver_init(bool _provisioning, char * network_name) 
 {
     provisioning = _provisioning;
     static bool running = false;
@@ -375,54 +357,37 @@ bool webserver_init(bool _provisioning)
 
     tcp_accept(listen_pcb, http_accept_cb);
 
-    printf("Web server listening on http://%s:80\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
+    printf("Web server listening on http://%s\n", network_name);
+
     return true;
 }
 
-
-void webserver_push_update(const char *topic, const char *json_payload)
+ void webserver_push_update(const char *topic, const char *json_payload)
 {
-    // Safety check for client and connection state
+    // 1. Ensure client exists and isn't in a closing state
     if (!sse_client || sse_client->state != ESTABLISHED)
     {
-        sse_client = NULL;
         return;
     }
 
-    // Allocate a buffer on the stack for the SSE frame
-    // 1024 is safer for the large 'analog' array payload
     char sse_buffer[1024];
-
-    // This wraps the payload so: topic="temperature", payload="98.1"
-    // becomes: data: {"temperature":98.1}
     int len = snprintf(sse_buffer, sizeof(sse_buffer), "data: {\"%s\":%s}\r\n\r\n", topic, json_payload);
 
-    if (len < 0 || len >= sizeof(sse_buffer))
-    {
-        printf("SSE Payload too large!\n");
+    if (len < 0 || len >= sizeof(sse_buffer)) {
         return;
     }
 
-    // Check if the TCP buffer has enough space to avoid blocking
+    cyw43_arch_lwip_begin();
+    
+    // 2. Strict check: only write if the entire length fits in the buffer
     if (tcp_sndbuf(sse_client) >= len)
     {
-        cyw43_arch_lwip_begin();
         err_t err = tcp_write(sse_client, sse_buffer, len, TCP_WRITE_FLAG_COPY);
         if (err == ERR_OK)
         {
-            tcp_output(sse_client); // Force the packet out immediately
+            tcp_output(sse_client);
         }
-        else
-        {
-            // If write fails, the client likely disconnected
-            printf("SSE Write failed: %d\n", err);
-            sse_client = NULL;
-        }
-        cyw43_arch_lwip_end();
     }
-    else
-    {
-        // Optional: Log that we are skipping a frame because the network is slow
-        printf("SSE Buffer full, skipping frame\n");
-    }
+    
+    cyw43_arch_lwip_end();
 }

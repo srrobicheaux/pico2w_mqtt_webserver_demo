@@ -24,6 +24,5 @@ typedef struct {
  * @return true if credentials captured (out buffers filled).
  */
 bool wifi_init(wifi_t *wifi_settings);
-int wifi_settings_JSON(char *payload, size_t len);
 
 #endif

@@ -26,7 +26,6 @@ project(batmon3 C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-
 add_executable(${PROJECT_NAME}
     main.c
     webserver.c
@@ -39,6 +38,7 @@ add_executable(${PROJECT_NAME}
 #    get_time.c
     system_info.c
     mqtt_manager.c
+    cJSON.c
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -56,7 +56,6 @@ target_link_libraries(${PROJECT_NAME}
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
 )
-
 
 pico_add_extra_outputs(${PROJECT_NAME})
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
