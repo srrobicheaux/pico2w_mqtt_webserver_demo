@@ -1,450 +1,428 @@
-#ifndef MQTT_MANAGER
-#define MQTT_MANAGER
-
-// #include "lwip/altcp_tls.h"
-#include "lwip/dns.h"
-#include "pico/cyw43_arch.h"
 #include "mqtt_manager.h"
-#include "system_info.h"
-#include "secrets.h"
-extern io_t *IOs;
+#include "pico/cyw43_arch.h"
+#include "lwip/dns.h"
+#include "hardware/watchdog.h"
+#include "hardware/gpio.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-typedef struct
-{
-    const char topic[128];   // e.g., Flash ID or "BATMON_01"
-    const char payload[256]; // e.g., "Batmon Pro"
-} MQTT_publish_t;
-
-// mqtt_settings_t *mqtt_settings;
-char *device_id;
-char *network_name;
-char dev_json[256];
-
-static void pub_request_cb(void *arg, err_t err)
-{
-    if (err != ERR_OK)
-    {
-        printf("MQTT Publish Callback Error: %d\n", err);
-        printf("free new attempt todo\n");
+static void pub_request_cb(void *arg, err_t err) {
+    if (err != ERR_OK) {
+        printf("MQTT Pub Error: %d\n", err);
     }
 }
 
-// --- Hardware Abstraction ---
-static void handle_gpio_command(MQTT_CLIENT_DATA_T *_state, int pin, char *data)
-{
-    printf("GPIO Action: Pin %d -> %s\n", pin, data);
-
-    bool is_input = true;
-    bool set_high = false;
-
-    if (lwip_stricmp(data, "on") == 0 || strcmp(data, "1") == 0)
-    {
-        is_input = false;
-        set_high = true;
-    }
-    if (lwip_stricmp(data, "off") == 0 || strcmp(data, "0") == 0)
-    {
-        is_input = false;
-        set_high = false;
-    }
-
-    if (!is_input)
-    {
-        if (pin < 4)
-        {
-            cyw43_arch_gpio_put(pin, set_high);
-        }
-        else
-        {
-            gpio_set_dir(pin, set_high);
-            ;
-            gpio_put(pin, set_high);
-        }
-    }
-
-    char topic_buf[128];
-    snprintf(topic_buf, sizeof(topic_buf), "%s/pin/%d/status", device_id, pin);
-
-    char msg[8];
-    snprintf(msg, sizeof(msg), "%s", gpio_get(pin) ? "on" : "off");
-    mqtt_manager_publish(_state, topic_buf, msg);
-}
-
-void _mqtt_manager_publish(MQTT_CLIENT_DATA_T *_state, const char *topic, const char *payload, bool retain, bool raw_topic)
-{
-    if (!_state->connect_done || !_state->mqtt_client_inst)
+void mqtt_manager_publish_raw(MQTT_CLIENT_DATA_T *_state, const char *topic, const char *payload, bool retain) {
+    if (!_state || _state->status != MQTT_CONNECT_ACCEPTED || !_state->mqtt_client_inst || !topic || !payload)
         return;
 
-    char full_topic[128];
-
-    if (!raw_topic)
-    {
-        snprintf(full_topic, sizeof(full_topic), "%s%s", device_id, topic);
-    }
-    else
-    {
-        strncpy(full_topic, topic, sizeof(full_topic) - 1);
-        full_topic[sizeof(full_topic) - 1] = '\0';
-    }
-
     cyw43_arch_lwip_begin();
-    // Use QoS 0 or 1 based on your needs; 0 is usually fine for sensors
-    err_t err = mqtt_publish(_state->mqtt_client_inst, full_topic, payload, strlen(payload), 0, retain, pub_request_cb, _state);
+    err_t err = mqtt_publish(_state->mqtt_client_inst, topic, payload, strlen(payload), 0, retain, pub_request_cb, _state);
     cyw43_arch_lwip_end();
 
-    if (err != ERR_OK)
-    {
-        printf("Failed to queue publish: %d\n", err);
+    if (err != ERR_OK) {
+        printf("MQTT Queue Fail: %d\n", err);
     }
 }
 
-void mqtt_manager_publish(MQTT_CLIENT_DATA_T *_state, const char *topic, const char *payload)
-{
-    if (_state->connect_done)
-        _mqtt_manager_publish(_state, topic, payload, false, false);
+static void hydrate_string_token(cJSON *obj, const char *key, const char *dev_id, int pin) {
+    cJSON *item = cJSON_GetObjectItem(obj, key);
+    if (!item || !item->valuestring || !strchr(item->valuestring, '%'))
+        return;
+
+    char buf[128];
+    int formats = 0;
+    for (int i = 0; item->valuestring[i]; i++) {
+        if (item->valuestring[i] == '%') formats++;
+    }
+
+    if (formats == 2) {
+        snprintf(buf, sizeof(buf), item->valuestring, dev_id, pin);
+    } else if (formats == 1) {
+        snprintf(buf, sizeof(buf), item->valuestring, dev_id);
+    } else {
+        return;
+    }
+    cJSON_SetValuestring(item, buf);
 }
 
-static void sub_unsub_topics(MQTT_CLIENT_DATA_T *_state, bool sub)
-{
-    char topic_buf[128];
-    // Listen for Home Assistant's own status (so we can re-announce ourselves)
+// Looks inside the nested "ha" block for state topics
+static const char *lookup_state_topic(cJSON *channels, int pin, char *fallback_buf, size_t fallback_sz, const char *dev_id) {
+    cJSON *ch = NULL;
+    cJSON_ArrayForEach(ch, channels) {
+        cJSON *pin_obj = cJSON_GetObjectItem(ch, "pin");
+        if (pin_obj && pin_obj->valueint == pin) {
+            cJSON *ha_node = cJSON_GetObjectItem(ch, "ha");
+            if (ha_node) {
+                cJSON *top_obj = cJSON_GetObjectItem(ha_node, "state_topic");
+                if (top_obj && top_obj->valuestring) {
+                    if (strchr(top_obj->valuestring, '%')) {
+                        snprintf(fallback_buf, fallback_sz, top_obj->valuestring, dev_id, pin);
+                        return fallback_buf;
+                    }
+                    return top_obj->valuestring;
+                }
+            }
+        }
+    }
+    snprintf(fallback_buf, fallback_sz, "%s/pin/%d/status", dev_id, pin);
+    return fallback_buf;
+}
+
+
+void mqtt_manager_publish_state(MQTT_CLIENT_DATA_T *_state, cJSON *updates) {
+    if (!updates || !_state || _state->status != MQTT_CONNECT_ACCEPTED || !_state->config_root)
+        return;
+
+    cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
+    const char *dev_id = (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon";
+    cJSON *channels = cJSON_GetObjectItem(_state->config_root, "channels");
+
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, updates) {
+            char topic[128];
+            char payload[32];
+            
+            // Build the topic path. 
+            // e.g., "batmon/pin/28" (Assuming your HA discovery uses this path)
+            snprintf(topic, sizeof(topic), "%s/pin/%s", dev_id, item->string);
+            // Format the float value for the MQTT payload
+            snprintf(payload, sizeof(payload), "%.2f", item->valuedouble);
+            // Publish the individual pin update
+            mqtt_manager_publish_raw(_state, topic, payload, false);
+    }
+}
+
+static void handle_inbound_gpio(MQTT_CLIENT_DATA_T *_state, int pin, const char *command) {
+//    printf("Inbound MQTT Control -> Pin %d: %s\n", pin, command);
+    bool set_high = (lwip_stricmp(command, "on") == 0 || strcmp(command, "1") == 0 || lwip_stricmp(command, "ON") == 0);
+
+    printf("Todo: set settings value and then mark channel dirty");
+//    set_pin(pin,set_high);
+
+    char fallback[128];
+    cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
+    const char *dev_id = (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon";
+    cJSON *channels = cJSON_GetObjectItem(_state->config_root, "channels");
+
+    const char *topic = lookup_state_topic(channels, pin, fallback, sizeof(fallback), dev_id);
+    mqtt_manager_publish_raw(_state, topic, set_high ? "ON" : "OFF", false);
+}
+
+// Safely format specific strings based on whether they contain %s, %d, or both
+static void safe_hydrate_key(cJSON *ha_node, const char *key, const char *dev_id, int pin) {
+    cJSON *item = cJSON_GetObjectItem(ha_node, key);
+    if (!item || !item->valuestring) return;
+
+    char buffer[256];
+    bool has_s = (strstr(item->valuestring, "%s") != NULL);
+    bool has_d = (strstr(item->valuestring, "%d") != NULL);
+
+    if (has_s && has_d) {
+        snprintf(buffer, sizeof(buffer), item->valuestring, dev_id, pin);
+    } else if (has_s) {
+        snprintf(buffer, sizeof(buffer), item->valuestring, dev_id);
+    } else if (has_d) {
+        snprintf(buffer, sizeof(buffer), item->valuestring, pin);
+    } else {
+        return; // No format tokens found, leave string as-is
+    }
+
+    cJSON_SetValuestring(item, buffer);
+}
+
+static void ha_publish_discovery(MQTT_CLIENT_DATA_T *_state) {
+    if (!_state || !_state->config_root) return;
+
+    cJSON *channels = cJSON_GetObjectItem(_state->config_root, "channels");
+    if (!channels) return;
+
+    cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
+    cJSON *model_obj = cJSON_GetObjectItem(_state->config_root, "model");
+    cJSON *version_obj = cJSON_GetObjectItem(_state->config_root, "version");
+    cJSON *name_obj = cJSON_GetObjectItem(_state->config_root, "device_name");
+
+    const char *dev_id = (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon_pico";
+    const char *model = (model_obj && model_obj->valuestring && strlen(model_obj->valuestring) > 0) ? model_obj->valuestring : "Pico 2W";
+    const char *dev_name = (name_obj && name_obj->valuestring && strlen(name_obj->valuestring) > 0) ? name_obj->valuestring : "BatMon Gateway";
+
+    // Handle integer or string version safely
+    char version_str[16];
+    if (version_obj && cJSON_IsNumber(version_obj)) {
+        snprintf(version_str, sizeof(version_str), "%d", version_obj->valueint);
+    } else if (version_obj && version_obj->valuestring) {
+        snprintf(version_str, sizeof(version_str), "%s", version_obj->valuestring);
+    } else {
+        strncpy(version_str, "1.0.0", sizeof(version_str));
+    }
+
+    printf("Generating Clean Auto-Discovery records from nested HA configurations...\n");
+
+    cJSON *ch = NULL;
+    cJSON_ArrayForEach(ch, channels) {
+        cJSON *enabled_obj = cJSON_GetObjectItem(ch, "enabled");
+        if (!enabled_obj || !cJSON_IsTrue(enabled_obj)) continue;
+
+        cJSON *pin_obj = cJSON_GetObjectItem(ch, "pin");
+        cJSON *ha_node = cJSON_GetObjectItem(ch, "ha");
+        if (!pin_obj || !ha_node) continue;
+
+        cJSON *platform_obj = cJSON_GetObjectItem(ha_node, "platform");
+        if (!platform_obj || !platform_obj->valuestring) continue;
+
+        int pin = pin_obj->valueint;
+        const char *platform = platform_obj->valuestring;
+
+        // Duplicate the block to avoid damaging runtime memory settings
+        cJSON *disc_payload = cJSON_Duplicate(ha_node, true);
+
+        // Run hydration across all necessary fields cleanly via an array loop
+        const char *keys_to_hydrate[] = {
+            "name", "state_topic", "command_topic", 
+            "unique_id", "availability_topic", "value_template"
+        };
+        for (size_t i = 0; i < sizeof(keys_to_hydrate) / sizeof(keys_to_hydrate[0]); i++) {
+            safe_hydrate_key(disc_payload, keys_to_hydrate[i], dev_id, pin);
+        }
+
+        // Strip the platform identifier out of the payload body
+        cJSON_DeleteItemFromObject(disc_payload, "platform");
+
+        // Inject the core, shared device registration schema block
+        cJSON *device = cJSON_CreateObject();
+        cJSON *ids = cJSON_CreateArray();
+        cJSON_AddItemToArray(ids, cJSON_CreateString(dev_id));
+        cJSON_AddItemToObject(device, "identifiers", ids);
+        cJSON_AddStringToObject(device, "name", dev_name);
+        cJSON_AddStringToObject(device, "model", model);
+        cJSON_AddStringToObject(device, "sw_version", version_str);
+        cJSON_AddItemToObject(disc_payload, "device", device);
+
+        // Build target registration endpoint topic path
+        char discovery_topic[128];
+        snprintf(discovery_topic, sizeof(discovery_topic), "homeassistant/%s/%s/%s_ch_%d/config",
+                 platform, dev_id, dev_id, pin);
+
+        char *raw_json = cJSON_PrintUnformatted(disc_payload);
+        if (raw_json) {
+            mqtt_manager_publish_raw(_state, discovery_topic, raw_json, true);
+            free(raw_json);
+        }
+
+        cJSON_Delete(disc_payload);
+        cyw43_arch_poll();
+    }
+}
+static void sub_unsub_topics(MQTT_CLIENT_DATA_T *_state, bool sub) {
+    if (!_state || !_state->config_root) return;
+
+    char buf[128];
+    cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
+    const char *dev_id = (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon";
+
     mqtt_sub_unsub(_state->mqtt_client_inst, "homeassistant/status", 0, NULL, _state, sub);
 
-    // Subscribe to GPIO commands
-    snprintf(topic_buf, sizeof(topic_buf), "%s/pin/#", device_id);
-    mqtt_sub_unsub(_state->mqtt_client_inst, topic_buf, 0, NULL, _state, sub);
+    snprintf(buf, sizeof(buf), "%s/restart", dev_id);
+    mqtt_sub_unsub(_state->mqtt_client_inst, buf, 0, NULL, _state, sub);
 
-    // Subscribe to GPIO commands
-//    snprintf(topic_buf, sizeof(topic_buf), "%s/IO", device_id);
-    //    mqtt_sub_unsub(_state->mqtt_client_inst, topic_buf, 0, NULL, _state, sub);
+    snprintf(buf, sizeof(buf), "%s/online", dev_id);
+    mqtt_sub_unsub(_state->mqtt_client_inst, buf, 0, NULL, _state, sub);
 
-    // Subscribe to a restart command
-    snprintf(topic_buf, sizeof(topic_buf), "%s/restart", device_id);
-    mqtt_sub_unsub(_state->mqtt_client_inst, topic_buf, 0, NULL, _state, sub);
+    cJSON *channels = cJSON_GetObjectItem(_state->config_root, "channels");
+    if (channels) {
+        cJSON *ch = NULL;
+        cJSON_ArrayForEach(ch, channels) {
+            cJSON *enabled = cJSON_GetObjectItem(ch, "enabled");
+            cJSON *pin_obj = cJSON_GetObjectItem(ch, "pin");
+            cJSON *ha_node = cJSON_GetObjectItem(ch, "ha");
 
-    // Subscribe to unline request
-    snprintf(topic_buf, sizeof(topic_buf), "%s/online", device_id);
-    mqtt_sub_unsub(_state->mqtt_client_inst, topic_buf, 0, NULL, _state, sub);
+            if (enabled && cJSON_IsTrue(enabled) && ha_node && pin_obj) {
+                cJSON *command_top = cJSON_GetObjectItem(ha_node, "command_topic");
+                if (command_top && command_top->valuestring) {
+                    if (strchr(command_top->valuestring, '%')) {
+                        snprintf(buf, sizeof(buf), command_top->valuestring, dev_id, pin_obj->valueint);
+                        mqtt_sub_unsub(_state->mqtt_client_inst, buf, 0, NULL, _state, sub);
+                    } else {
+                        mqtt_sub_unsub(_state->mqtt_client_inst, command_top->valuestring, 0, NULL, _state, sub);
+                    }
+                }
+            }
+        }
+    }
 }
 
-static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
-{
+static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len) {
     MQTT_CLIENT_DATA_T *_state = (MQTT_CLIENT_DATA_T *)arg;
-    strncpy(_state->topic, topic, sizeof(_state->topic) - 1);
-}
-
-void ha_add_info(MQTT_CLIENT_DATA_T *_state, char *value, char *class, char *Units)
-{
-    char topic[128];
-    char payload[1024];
-    char name[32];
-
-    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s_sensor_%s/config", device_id, device_id, value);
-    snprintf(payload, sizeof(payload),
-             "{"
-             "\"platform\": \"sensor\","
-             "\"name\": \"System %s\","
-             "\"device_class\": \"%s\","
-             "\"state_class\": \"measurement\","
-             "\"unit_of_measurement\": \"%s\","
-             "\"state_topic\": \"%s/system_status\","
-             "\"suggested_display_precision\": 2,"
-             "\"value_template\": \"{{value_json.%s}}\","
-             "\"expire_after\": 10,"
-             "\"unique_id\": \"%s_analog_%s\","
-             "\"availability_topic\": \"%s/status\","
-             "\"payload_available\": \"online\","
-             "\"payload_not_available\": \"offline\","
-             "\"qos\": 0.0,"
-             "%s }",
-             value,
-             class,
-             Units,
-             device_id,
-             value,
-             device_id, value,
-             device_id,
-             dev_json);
-    // printf("Publishing HA Discovery for %s:\nTopic: %s\nPayload: %s\n", value, topic, payload);
-    //  Use the wrapper we discussed earlier to send to the raw topic
-    _mqtt_manager_publish(_state, topic, payload, true, true);
-}
-
-void ha_add_sensor(MQTT_CLIENT_DATA_T *_state, int pin)
-{
-    char topic[128];
-    char payload[1024];
-    char name[32];
-
-    // Needs to be: homeassistant/switch/<device_id>/<object_id>/config
-    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s_sensor_%d/config", device_id, device_id, pin);
-    snprintf(payload, sizeof(payload),
-             "{"
-             "\"platform\": \"sensor\","
-             "\"name\": \"Analog %d\","
-             "\"device_class\": \"voltage\","
-             "\"state_class\": \"measurement\","
-             "\"unit_of_measurement\": \"V\","
-             "\"state_topic\": \"%s/IO\","
-             "\"suggested_display_precision\": 2,"
-             "\"value_template\": \"{{value_json.analog[%d]}}\","
-             "\"expire_after\": 10,"
-             "\"unique_id\": \"%s_analog_%d\","
-             "\"availability_topic\": \"%s/status\","
-             "\"payload_available\": \"online\","
-             "\"payload_not_available\": \"offline\","
-             "\"qos\": 0.0,"
-             "%s }",
-             pin,
-             device_id,
-             pin,
-             device_id, pin,
-             device_id,
-             dev_json);
-
-    // printf("Publishing HA Discovery for Pin %d:\nTopic: %s\nPayload: %s\n", pin, topic, payload);
-    //  Use the wrapper we discussed earlier to send to the raw topic
-
-    _mqtt_manager_publish(_state, topic, payload, true, true);
-}
-
-// Updated to use 3 parameters, consistent with your ha_publish_discovery call
-void ha_add_switch(MQTT_CLIENT_DATA_T *_state, int pin)
-{
-    char topic[128];
-    char payload[1024];
-    char name[32] = "Restart";
-    // Needs to be: homeassistant/switch/<device_id>/<object_id>/config
-    snprintf(topic, sizeof(topic), "homeassistant/switch/%s/%s_switch_%d/config", device_id, device_id, pin);
-
-    if (pin != -99)
-    {
-        strncpy(name, IOs->pios[pin].name, sizeof(name) - 1);
-    }
-
-    // E3C3D7106A914008/pin/15
-
-    snprintf(payload, sizeof(payload),
-             "{"
-             "\"platform\": \"switch\","
-             "\"name\": \"%s\","
-             "\"device_class\": \"switch\","
-
-             "\"command_topic\": \"%s/pin/%d\","
-             "\"payload_off\": \"OFF\","
-             "\"payload_on\": \"ON\","
-
-//             "\"state_topic\": \"%s/IO\","
-//             "\"value_template\": \"{{value_json.pio[%d]}}\","
-
-            "\"state_topic\": \"%s/pin/%d\","
-             "\"state_off\": \"OFF\","
-             "\"state_on\": \"ON\","
-             "\"expire_after\": 10,"
-
-             "\"unique_id\": \"%s_switch_%d\","
-             "\"availability_topic\": \"%s/status\","
-             "\"payload_available\": \"online\","
-             "\"payload_not_available\": \"offline\","
-             "\"qos\": 0.0,"
-             "%s }",
-             name,
-             device_id, pin,
-             device_id, pin,
-             device_id, pin,
-             device_id,
-             dev_json);
-
-    if (pin == -99)
-    {
-        char *pos = strstr(payload, "/pin/-99");
-        memcpy(pos, "/restart", 8);
-    }
-
-    // printf("Publishing HA Discovery for Pin %d:\nTopic: %s\nPayload: %s\n", pin, topic, payload);
-    // printf("Publishing HA Discovery for Pin %d:\nTopic: %s\nPayload: %s\n", pin, topic, payload);
-    //  Use the wrapper we discussed earlier to send to the raw topic
-
-    _mqtt_manager_publish(_state, topic, payload, true, true);
-}
-
-static void ha_publish_discovery(MQTT_CLIENT_DATA_T *_state)
-{
-    printf("Processing HA Discovery. Status: %s\n", _state->data);
-
-    // reused switch for pico resetting becuase almost identical payload and it simplifies the logic a lot.
-    ha_add_switch(_state, -99);
-
-    ha_add_info(_state, "temperature", "temperature", "°F");
-    ha_add_info(_state, "uptime", "duration", "s");
-
-    for (int i = 0; i < 3; i++)
-    {
-        //     IO_settings.analogs[i].name
-        //        ha_add_sensor(i,dev_json, "voltage", "V");
-        ha_add_sensor(_state, i);
-        cyw43_arch_poll(); // This is required in poll mode
-    }
-    for (int i = 10; i < 16; i++)
-    {
-        ha_add_switch(_state, i);
-        cyw43_arch_poll(); // This is required in poll mode
+    if (topic) {
+        strncpy(_state->topic, topic, sizeof(_state->topic) - 1);
+        _state->topic[sizeof(_state->topic) - 1] = '\0';
     }
 }
 
-static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
-{
+static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags) {
     MQTT_CLIENT_DATA_T *_state = (MQTT_CLIENT_DATA_T *)arg;
     size_t safe_len = (len < sizeof(_state->data) - 1) ? len : sizeof(_state->data) - 1;
     memcpy(_state->data, data, safe_len);
     _state->data[safe_len] = '\0';
-    char topic_buf[128];
 
-    printf("Inbound -> Topic: %s | Data: %s\n", _state->topic, _state->data);
+    if (strstr(_state->topic, "/restart")) {
+        watchdog_reboot(0, 0, 100);
+        return;
+    }
 
-    // Topic parsing: find "/pin/"
-    const char *pin_ptr = strstr(_state->topic, "/pin/");
-    if (pin_ptr)
-    {
-        int pin_num;
-        if (sscanf(pin_ptr, "/pin/%d", &pin_num) == 1)
-        {
-            if (sscanf(pin_ptr, "/status", &pin_num) == 1)
-            {
-                strcpy(_state->data, "is_input");
+    if (strstr(_state->topic, "homeassistant/status")) {
+        if (lwip_stricmp(_state->data, "online") == 0) {
+            ha_publish_discovery(_state);
+        }
+        return;
+    }
+
+    cJSON *channels = cJSON_GetObjectItem(_state->config_root, "channels");
+    cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
+    const char *dev_id = (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon";
+
+    if (channels) {
+        cJSON *ch = NULL;
+        cJSON_ArrayForEach(ch, channels) {
+            cJSON *ha_node = cJSON_GetObjectItem(ch, "ha");
+            if (ha_node) {
+                cJSON *cmd_obj = cJSON_GetObjectItem(ha_node, "command_topic");
+                if (cmd_obj && cmd_obj->valuestring) {
+                    char check_buf[128];
+                    const char *expected_topic = cmd_obj->valuestring;
+
+                    if (strchr(expected_topic, '%')) {
+                        cJSON *pin_obj = cJSON_GetObjectItem(ch, "pin");
+                        if (pin_obj) {
+                            snprintf(check_buf, sizeof(check_buf), expected_topic, dev_id, pin_obj->valueint);
+                            expected_topic = check_buf;
+                        }
+                    }
+
+                    if (strcmp(_state->topic, expected_topic) == 0) {
+                        cJSON *pin_obj = cJSON_GetObjectItem(ch, "pin");
+                        if (pin_obj) {
+                            handle_inbound_gpio(_state, pin_obj->valueint, _state->data);
+                        }
+                        break;
+                    }
+                }
             }
-            handle_gpio_command(_state, pin_num, _state->data);
         }
     }
-    else if (strstr(_state->topic, "/restart"))
-    {
-        reset();
-    }
-    else if (strstr(_state->topic, "homeassistant/status") != 0)
-    {
-        printf("Homeassistant is %s. ", _state->data);
-        ha_publish_discovery(_state);
-
-        snprintf(topic_buf, sizeof(topic_buf), "%s/status", device_id);
-        mqtt_manager_publish(_state, topic_buf, "online");
-    }
-    else if (strstr(_state->topic, "/online") || strstr(_state->topic, "/status"))
-    {
-        snprintf(topic_buf, sizeof(topic_buf), "%s/status", device_id);
-        mqtt_manager_publish(_state, topic_buf, "online");
-    }
 }
 
-static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status)
-{
+static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status) {
     MQTT_CLIENT_DATA_T *_state = (MQTT_CLIENT_DATA_T *)arg;
     _state->status = status;
-    if (status == MQTT_CONNECT_ACCEPTED)
-    {
-        printf("MQTT Connected and Accepted!\n");
+    _state->is_connecting = false; // The cycle is complete, win or lose
+
+    if (status == MQTT_CONNECT_ACCEPTED) {
+        printf("MQTT Session Bound.\n");
         sub_unsub_topics(_state, true);
-        mqtt_manager_publish(_state, "/status", "online");
+
+        char buf[128];
+        cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
+        snprintf(buf, sizeof(buf), "%s/status", (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon");
+        mqtt_manager_publish_raw(_state, buf, "online", true);
+
+        ha_publish_discovery(_state);
+    } else {
+        printf("MQTT Connection Dropped/Refused: %d\n", status);
     }
-    else
-    {
-        printf("MQTT Connection Refused/Disconnected: %d\n", status);
-        sub_unsub_topics(_state, false);
-        //        panic_unsupported();
-    }
-    _state->connect_done = true;
 }
 
-static void start_client(MQTT_CLIENT_DATA_T *_state)
-{
+static void start_client(MQTT_CLIENT_DATA_T *_state) {
     if (!_state->mqtt_client_inst)
         _state->mqtt_client_inst = mqtt_client_new();
 
     mqtt_set_inpub_callback(_state->mqtt_client_inst, mqtt_incoming_publish_cb, mqtt_incoming_data_cb, _state);
 
+    cJSON *mqtt_node = cJSON_GetObjectItem(_state->config_root, "mqtt");
+    if (!mqtt_node) {
+        _state->is_connecting = false;
+        return;
+    }
+
+    cJSON *user_obj = cJSON_GetObjectItem(mqtt_node, "user");
+    cJSON *pass_obj = cJSON_GetObjectItem(mqtt_node, "password");
+    cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
+
+    _state->mqtt_client_info.client_id = (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon_pico";
+    _state->mqtt_client_info.keep_alive = 60;
+    _state->mqtt_client_info.client_user = (user_obj && user_obj->valuestring) ? user_obj->valuestring : NULL;
+    _state->mqtt_client_info.client_pass = (pass_obj && pass_obj->valuestring) ? pass_obj->valuestring : NULL;
+
     cyw43_arch_lwip_begin();
-    err_t err = mqtt_client_connect(_state->mqtt_client_inst, &_state->mqtt_server_address, MQTT_PORT,
-                                    mqtt_connection_cb, _state, &_state->mqtt_client_info);
+    err_t err = mqtt_client_connect(_state->mqtt_client_inst, &_state->mqtt_server_address, MQTT_PORT, mqtt_connection_cb, _state, &_state->mqtt_client_info);
     cyw43_arch_lwip_end();
 
-    if (err != ERR_OK)
-    {
-        _state->status = err;
-        printf("\nMQTT connect launch failed: %d\n", err);
-        _state->connect_done = false;
+    if (err != ERR_OK) {
+        printf("Immediate connect failed: %d\n", err);
+        _state->status = MQTT_CONNECT_DISCONNECTED;
+        _state->is_connecting = false;
     }
 }
 
-static void dns_found_cb(const char *hostname, const ip_addr_t *ipaddr, void *arg)
-{
+static void dns_found_cb(const char *hostname, const ip_addr_t *ipaddr, void *arg) {
     MQTT_CLIENT_DATA_T *_state = (MQTT_CLIENT_DATA_T *)arg;
-    if (ipaddr)
-    {
+    if (ipaddr) {
         _state->mqtt_server_address = *ipaddr;
         start_client(_state);
-    }
-    else
-    {
-        printf("DNS Lookup failed for broker\n");
-    }
-    if (ipaddr)
-    {
-        _state->mqtt_server_address = *ipaddr;
-        start_client(_state);
-    }
-    else
-    {
-        printf("DNS Lookup failed for broker\n");
+    } else {
+        printf("DNS Resolution Failed for broker.\n");
+        _state->status = MQTT_CONNECT_DISCONNECTED;
+        _state->is_connecting = false;
     }
 }
 
-void mqtt_manager_start(MQTT_CLIENT_DATA_T *state, mqtt_settings_t *mqtt_settings)
-{
-    static bool started = false;
-    if (MQTT_CONNECT_ACCEPTED == state->status)
-        return;
+bool mqtt_manager_start(MQTT_CLIENT_DATA_T *state) {
+    if (!state || !state->config_root)
+        return false;
 
-    if (started && !state->connect_done)
-        return;
+    // Already connected? Nothing to do.
+    if (state->status == MQTT_CONNECT_ACCEPTED)
+        return true;
 
-    if (state->status != 4096)
-    { // state->mqtt_client_inst) {
-        printf("MQTT Client already running. Restarting connection...%d\n", state->status);
-        mqtt_unsubscribe(state->mqtt_client_inst, "#", NULL, state);
-        // memset(state->mqtt_client_inst, 0, sizeof(state->mqtt_client_inst));
-
-        mqtt_client_free(state->mqtt_client_inst);
-        // state->mqtt_client_inst; // Force re-creation of client
-        // state->mqtt_client_inst = NULL; // Force re-creation of client
-        // reset();
+    // Connection attempt in progress? Let it ride.
+    if (state->is_connecting) {
+        cyw43_arch_poll();
+        return false;
     }
-    started = true;
 
-    printf("Starting MQTT Manager Broker: %s, Node ID: %s, Object ID: %s\t", mqtt_settings->server, network_name, device_id);
-    state->mqtt_client_info.client_id = device_id;
-    state->mqtt_client_info.keep_alive = 60;
-    state->mqtt_client_info.client_user = mqtt_settings->user;
-    state->mqtt_client_info.client_pass = mqtt_settings->password;
+    cJSON *mqtt_node = cJSON_GetObjectItem(state->config_root, "mqtt");
+    if (!mqtt_node) return false;
+
+    cJSON *broker_obj = cJSON_GetObjectItem(mqtt_node, "broker");
+    if (!broker_obj || !broker_obj->valuestring || !strlen(broker_obj->valuestring)) return false;
+    cJSON *user_obj = cJSON_GetObjectItem(mqtt_node, "user");
+    if (!user_obj || !user_obj->valuestring || !strlen(user_obj->valuestring)) return false;
+    cJSON *password_obj = cJSON_GetObjectItem(mqtt_node, "password");
+    if (!password_obj || !password_obj->valuestring || !strlen(password_obj->valuestring)) return false;
+
+    // Set guard flag to handle async execution safely
+    state->is_connecting = true;
+    printf("Resolving MQTT Broker: %s\n", broker_obj->valuestring);
 
     cyw43_arch_lwip_begin();
-    err_t err = dns_gethostbyname(mqtt_settings->server, &state->mqtt_server_address, dns_found_cb, state);
+    err_t err = dns_gethostbyname(broker_obj->valuestring, &state->mqtt_server_address, dns_found_cb, state);
     cyw43_arch_lwip_end();
 
-    if (err == ERR_OK)
+    if (err == ERR_OK) {
         start_client(state);
+    } else if (err != ERR_INPROGRESS) {
+        // Immediate hard failure (e.g. invalid arguments or down interface)
+        state->is_connecting = false;
+    }
+
+    return false;
 }
 
-bool mqtt_init(wifi_t *_wifi_settings, mqtt_settings_t *_mqtt_settings, MQTT_CLIENT_DATA_T *_state)
-{
-    _state->connect_done = false;
-    device_id = _wifi_settings->device_id;
-    network_name = _wifi_settings->network_name;
-
-    snprintf(dev_json, sizeof(dev_json),
-             "\"dev\": {\"ids\":[\"%s\"],\"mdl\":\"%s\",\"sw\":\"%s\",\"name\": \"%s\","
-             "\"configuration_url\": \"http://%s/config\"}",
-             device_id, _mqtt_settings->model, _mqtt_settings->version, network_name, _mqtt_settings->server, device_id);
-
+bool mqtt_manager_init(MQTT_CLIENT_DATA_T *_state, cJSON *config) {
+    if (!_state || !config) return false;
+    memset(_state, 0, sizeof(MQTT_CLIENT_DATA_T));
+    _state->config_root = config;
+    _state->status = MQTT_CONNECT_DISCONNECTED; // Force evaluation out of the gate
     return true;
 }
-
-#endif

@@ -1,393 +1,313 @@
+#include "cJSON.h"
+
 #include "pico/cyw43_arch.h"
 #include "lwip/tcp.h"
+#include "hardware/watchdog.h"
+#include "pico/stdlib.h"
+#include "webserver.h"
+#include "flash_manager.h"
+#include "build/dashboard_html_embed.h"
+#include "build/config_html_embed.h"
+#include "io_manager.h"
+#include <string.h>
+#include <stdio.h>
 
-#include "flash.h"
-#include "html.dashboard.h"
-#include "html.wifiform.h"
-#include "html.wifisuccess.h"
-#include "system_info.h"
+#define PORT 80
 
-#define HTTP_PORT 80
+static struct tcp_pcb *sse_pcb = NULL;
 
-#define RESPOND_NOT_FOUND "<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>404 - File Not Found</h1></body></html>"
-#define RESPOND_SSE "data: {\"trend\":\"STARTED\",\"uptime\":0}\r\n\r\n"
+// ==================== SAFARI / iOS FRIENDLY HEADERS ====================
+#define HEADER_HTML                                          \
+    "HTTP/1.1 200 OK\r\n"                                    \
+    "Content-Type: text/html; charset=UTF-8\r\n"             \
+    "Cache-Control: no-cache, no-store, must-revalidate\r\n" \
+    "Pragma: no-cache\r\n"                                   \
+    "Expires: 0\r\n"                                         \
+    "Connection: close\r\n"                                  \
+    "Content-Length: %d\r\n\r\n"
 
-// other responses defined n the html files
-#define RESPOND_NOT_FOUND "<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>404 - File Not Found</h1></body></html>"
-#define RESPOND_SSE "data: {\"trend\":\"STARTED\",\"uptime\":0}\r\n\r\n"
-#define HEADER_CONTINUE "HTTP/1.1 100 Continue\r\n\r\n"
-// this one needs to be modifiable to add length
-#define HEADER_SUCCESS            \
-    "HTTP/1.1 200 OK\r\n"         \
-    "Content-Type: text/html\r\n" \
-    "Connection: close\r\n"       \
-    "Cache-Control: no-cache\r\n" \
-    "Content-Length:%d\r\n\r\n"
-#define HEADER_JSON                      \
-    "HTTP/1.1 200 OK\r\n"                \
-    "Content-Type: application/json\r\n" \
-    "Connection: close\r\n"              \
-    "Cache-Control: no-cache\r\n"        \
-    "Content-Length:%d\r\n\r\n"
-#define HEADER_SSE                        \
-    "HTTP/1.1 200 OK\r\n"                 \
-    "Content-Type: text/event-stream\r\n" \
-    "Cache-Control: no-cache\r\n"         \
-    "Connection: keep-alive\r\n"          \
+#define HEADER_SSE                                       \
+    "HTTP/1.1 200 OK\r\n"                                \
+    "Content-Type: text/event-stream; charset=UTF-8\r\n" \
+    "Cache-Control: no-cache\r\n"                        \
+    "Connection: keep-alive\r\n"                         \
     "Access-Control-Allow-Origin: *\r\n\r\n"
-#define HEADER_REDIRECT                \
-    "HTTP/1.1 302 Found\r\n"           \
-    "Location: http://192.168.4.1\r\n" \
-    "Connection: close\r\n"            \
-    "Content-Length: %d\r\n\r\n"
-#define HEADER_NOT_FOUND                         \
-    "HTTP/1.1 404 Not Found\r\n"                 \
-    "Content-Type: text/html; charset=utf-8\r\n" \
+
+#define HEADER_JSON                                     \
+    "HTTP/1.1 200 OK\r\n"                               \
+    "Content-Type: application/json; charset=UTF-8\r\n" \
+    "Cache-Control: no-cache, no-store\r\n"             \
+    "Pragma: no-cache\r\n"                              \
+    "Connection: close\r\n"                             \
     "Content-Length: %d\r\n\r\n"
 
-static struct tcp_pcb *sse_client = NULL;
-static bool provisioning = false;
-static volatile bool in_recv_handler = false;
-static char response_buffer[2048];  // Increased for full settings JSON
+#define HEADER_REDIRECT                       \
+    "HTTP/1.1 302 Found\r\n"                  \
+    "Location: http://192.168.4.1/config\r\n" \
+    "Connection: close\r\n\r\n"
 
-static err_t http_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len)
+char buffer[4000];
+static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
-    // Close after send complete for non-SSE
-    if (tpcb != sse_client)
+    // TODO is_provisioning
+    bool is_provisioning = false;
+
+    if (!p)
     {
         tcp_close(tpcb);
+        return ERR_OK;
     }
-    return ERR_OK;
-}
 
-// Define this at the top of your file or in a header
-int hex_char_to_int(char c)
-{
-    c = tolower((unsigned char)c);
-    if (isdigit(c))
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    return 0;
-}
+    static bool posting = false;
+    cJSON *config = (cJSON *)arg;
 
-void url_decode(char *dst, size_t dst_len, const char *src)
-{
-    char *p_dst = dst;
-    const char *p_src = src;
-    size_t written = 0;
+    tcp_recved(tpcb, p->tot_len);
+    char *req = (char *)p->payload;
 
-    while (*p_src && written < dst_len - 1) // Added bounds check here
+    static int contentLength = 0;
+    //    printf("Received request (%d bytes): %.20s ... %.20s\n", p->tot_len, req, req + p->tot_len - 20);
+
+    // POST save settings
+    if (strncmp(req, "GET ", 4) == 0)
     {
-        if (*p_src == '%' && isxdigit(p_src[1]) && isxdigit(p_src[2]))
+        posting = false;
+        contentLength = 0;
+    }
+
+    // restart
+    if (strncmp(req, "POST /restart", 12) == 0)
+    {
+        printf("Rebooting from request\n");
+        watchdog_reboot(0, 0, 1500);
+
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    if (strncmp(req, "POST /save", 10) == 0)
+    {
+        posting = true;
+        buffer[0] = '\0';
+        contentLength = atoi(strstr(req, "Content-Length: ") + sizeof("Content-Length: ") - 1);
+        printf("Content-Length:%d\n", contentLength);
+        return ERR_OK;
+    }
+
+    if (posting)
+    {
+        // keep appending onto the end of buffer until you have Content-Length
+        int len = strlen(buffer) + p->tot_len;
+        if (len < sizeof(buffer))
         {
-            int high = hex_char_to_int(p_src[1]);
-            int low = hex_char_to_int(p_src[2]);
-            *p_dst++ = (char)((high << 4) | low);
-            p_src += 3;
-        }
-        else if (*p_src == '+')
-        {
-            *p_dst++ = ' ';
-            p_src++;
+            memcpy(buffer + strlen(buffer), req, p->tot_len);
+            buffer[len] = '\0';
         }
         else
         {
-            *p_dst++ = *p_src++;
+            printf("Buffer Overflow Overted!\n");
+            buffer[0] = '\0';
+            posting = false;
+            return ERR_MEM;
         }
-        written++;
-    }
-    *p_dst = '\0';
-}
 
-// Remove url_decode from here!
-bool parser(char *haystack, const char *needle, char *destination, size_t dest_max_len)
-{
-    char *ptr = haystack;
-    size_t needle_len = strlen(needle);
-
-    while ((ptr = strstr(ptr, needle)) != NULL)
-    {
-        bool is_start = (ptr == haystack || *(ptr - 1) == '?' || *(ptr - 1) == '&');
-
-        if (is_start && ptr[needle_len] == '=')
+        if (len == contentLength)
         {
-            char *value = ptr + needle_len + 1;
-            int len = strcspn(value, "&\0");
-            if (len == 0)
+            // position at the last of the received data that is the length of Content-Length
+            cJSON *new_values = cJSON_Parse(buffer + len - contentLength);
+            if (new_values)
             {
-                destination[0] = '\0';
+                printf("TODO: validate saving of passwords\n");
+                cJSON *new_wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(new_values, "wifi"), "password");
+                cJSON *old_wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "wifi"), "password");
+                if (strncmp(cJSON_GetStringValue(new_wifi_pw), "*****", 64) == 0)
+                {
+                    cJSON_SetValuestring(new_wifi_pw, cJSON_GetStringValue(old_wifi_pw));
+                }
+                cJSON *new_mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(new_values, "mqtt"), "password");
+                cJSON *old_mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "mqtt"), "password");
+                if (strncmp(cJSON_GetStringValue(new_mqtt_pw), "*****", 64) == 0)
+                {
+                    cJSON_SetValuestring(new_mqtt_pw, cJSON_GetStringValue(old_mqtt_pw));
+                }
+
+                cJSON_Delete(config);            // free the old config
+                flash_save_settings(new_values); // print json string to flash storage
+                config = load_configuration();
+                cJSON_Delete(new_values); // free the old config
+
+                posting = false;
+                buffer[0] = '\0';
+                contentLength = 0;
+
+                const char *resp = "{\"status\":\"ok\",\"message\":\"Saved.\"}";
+                char header[256];
+                snprintf(header, sizeof(header), HEADER_JSON, strlen(resp));
+                tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
+                tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
+                tcp_output(tpcb);
+                pbuf_free(p);
+                return ERR_OK;
             }
             else
             {
-                size_t copy_len = (len < dest_max_len - 1) ? len : dest_max_len - 1;
-                strncpy(destination, value, copy_len);
-                destination[copy_len] = '\0';
+                printf("Buffer Error:%s\n", buffer);
+                cJSON_Delete(new_values);
+                pbuf_free(p);
+                return ERR_ABRT;
             }
-            return true;
+            return ERR_OK;
         }
-        ptr++;
     }
-    return false;
-}
 
-static void http_err_cb(void *arg, err_t err)
-{
-    struct tcp_pcb *tpcb = (struct tcp_pcb *)arg;
-    if (tpcb == sse_client)
+    // Captive portal redirects (Apple, Android, etc.)
+    else if (strstr(req, "captive.apple.com") || strstr(req, "hotspot-detect.html") || strstr(req, "connectivity-check"))
     {
-        printf("SSE client disconnected via error\n");
-        sse_client = NULL;
-    }
-}
-
-static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
-{
-    if (in_recv_handler || p == NULL) {
-        if (p) pbuf_free(p);
+        tcp_write(tpcb, HEADER_REDIRECT, strlen(HEADER_REDIRECT), TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
         return ERR_OK;
     }
-    in_recv_handler = true;
 
-    tcp_recved(tpcb, p->tot_len);
-
-    static char req[2048];
-    int length = MIN(p->len, sizeof(req) - 1);
-    memcpy(req, p->payload, length);
-    req[length] = '\0';
-
-    char header_buffer[512] = {0};
-    char *header = header_buffer;
-    char *response = response_buffer;
-
-    static bool posting = false;
-
-    // POST handler
-    if (strncmp(req, "POST /save_settings", 19) == 0 || posting) {
-        char *body = strstr(req, "\r\n\r\n");
-        if (body) {body += 4;} else {body = req;}
-
-        if (!posting && body !=req) {
-            posting = true;
-            printf("Waiting for more POST data...\n");
-            in_recv_handler = false;
-            return ERR_OK; // Wait for the next packet
-        }
-        posting = false; // Reset for next time
-
-        DeviceSettings settings;
-
-        if (json_to_settings(body, &settings)) {
-            save_settings(&settings);
-            response = "{\"status\":\"ok\",\"message\":\"Settings saved.\"}";
-            printf("Settings Saved\n"); 
-        } else {
-            response = "{\"status\":\"error\",\"message\":\"Failed to parse settings\"}";
-        }
-
-        header = HEADER_JSON;
-        snprintf(header_buffer, sizeof(header_buffer), HEADER_JSON, strlen(response));
-        header = header_buffer;
-    }
-    // GET /settings
-    else if (strncmp(req, "GET /settings ", 14) == 0) {
-        printf("Serving full settings JSON\n");
-        int len = settings_to_json_compact(response_buffer, sizeof(response_buffer));
-        
-        snprintf(header_buffer, sizeof(header_buffer), HEADER_JSON, len);
-        header = header_buffer;
-        response = response_buffer;
-    }
-    else if (req[0] == 'G')
+    // Settings
+    else if (strncmp(req, "GET /settings", 11) == 0)
     {
-        switch (req[5])
+        config = load_configuration();
+        // todo need to scrap passwords before sending config to client
+        // scrape passwords for setings response
+        char temp_wifi[64];
+        char temp_mqtt[64];
+
+        cJSON *wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "wifi"), "password");
+        cJSON *mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "mqtt"), "password");
+        strncpy(temp_wifi, cJSON_GetStringValue(wifi_pw), 64);
+        strncpy(temp_mqtt, cJSON_GetStringValue(mqtt_pw), 64);
+
+        cJSON_SetValuestring(wifi_pw, "*****");
+        cJSON_SetValuestring(mqtt_pw, "*****");
+
+        if (cJSON_PrintPreallocated(config, buffer, sizeof(buffer), 0))
         {
-        case 'e': // GET /events
-            if (strncmp(req, "GET /events ", 12) == 0)
-            {
-                // If there's an existing client, don't just overwrite!
-                // Logic: The browser is refreshing, the old PCB is now invalid.
-                if (sse_client != NULL && sse_client != tpcb)
-                {
-                    tcp_abort(sse_client);
-                }
 
-                sse_client = tpcb;
+            printf("Serving settings(%d bytes)\n", strlen(buffer));
+            char header[256];
+            snprintf(header, sizeof(header), HEADER_HTML, strlen(buffer));
+            tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
+            tcp_write(tpcb, buffer, strlen(buffer), TCP_WRITE_FLAG_COPY);
+            tcp_output(tpcb);
+            cJSON_SetValuestring(wifi_pw, temp_wifi);
+            cJSON_SetValuestring(mqtt_pw, temp_mqtt);
 
-                // Register the error callback so we know if this client dies
-                tcp_arg(tpcb, tpcb);
-                tcp_err(tpcb, http_err_cb);
-
-                header = HEADER_SSE;
-                response = RESPOND_SSE;
-                printf("SSE client connected\n");
-            }
-            break;
-        case 's': // /settings
-            if (strncmp(req, "GET /settings ", 14) == 0)
-            {
-                printf("Serving Settings JSON\n");
-
-
-                settings_to_json_compact(response_buffer, sizeof(response_buffer));
-
-                int total_json_len = strlen(response_buffer);
-
-                snprintf(header_buffer, sizeof(header_buffer), HEADER_JSON, total_json_len);
-                header = header_buffer;
-                response = response_buffer;
-            }
-            break;
-
-        case 'p': // GET /pio=
-            if (strncmp(req, "GET /pio=", 9) == 0)
-            {
-                int pio = atoi(req + 9);
-                gpio_action_t action = GPIO_ACTION_READ;
-
-                if (strstr(req, "toggle"))
-                    action = GPIO_ACTION_TOGGLE;
-                else if (strstr(req, "press"))
-                    action = GPIO_ACTION_PRESS;
-
-                bool final_state = pin_action(pio, action);
-
-                header = HEADER_JSON;
-                snprintf(response_buffer, sizeof(response_buffer),
-                         "{\"pio\":%d, \"value\":%s}\r\n",
-                         pio, (final_state ? "true" : "false"));
-                response = response_buffer;
-            }
-            break;
-
-        case 'd': // /dashboard
-            if (strncmp(req, "GET /dashboard ", 15) == 0)
-                response = RESPOND_DASHBOARD;
-            break;
-
-        case 'c': // /config
-            if (strncmp(req, "GET /config ", 12) == 0)
-                response = RESPOND_CONFIG;
-            break;
-
-        default: // root or captive portal
-            if (provisioning)
-            {
-                if (strstr(req, "captive.apple.com"))
-                    snprintf(header_buffer, sizeof(header_buffer), HEADER_REDIRECT, 0);
-                else
-                {
-                    header = HEADER_SUCCESS;
-                    response = RESPOND_CONFIG;
-                }
-            }
-            else
-            {
-                header = HEADER_SUCCESS;
-                response = RESPOND_DASHBOARD;
-            }
-            break;
+            pbuf_free(p);
+            return ERR_OK;
+        }
+        else
+        {
+            cJSON_SetValuestring(wifi_pw, temp_wifi);
+            cJSON_SetValuestring(mqtt_pw, temp_mqtt);
+            printf("Failed Serving settings(%d bytes)\n", strlen(buffer));
+            return ERR_MEM;
         }
     }
 
-    // Fallback 404
-    if (response[0] == '\0') {
-        header = HEADER_NOT_FOUND;
-        response = RESPOND_NOT_FOUND;
+    // start SSE Events
+    else if (strncmp(req, "GET /events", 11) == 0)
+    {
+        printf("Starting SSE Events\n");
+        sse_pcb = tpcb;
+        tcp_write(tpcb, HEADER_SSE, strlen(HEADER_SSE), TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        return ERR_OK; // Keep connection open
     }
 
-    // Send response (your existing send logic)
-    cyw43_arch_lwip_begin();
-    tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-    if (response && response[0]) {
-        tcp_write(tpcb, response, strlen(response), TCP_WRITE_FLAG_COPY);
-    }
-    tcp_output(tpcb);
-    cyw43_arch_lwip_end();
+    // Config page
+    else if (strncmp(req, "GET /config", 11) == 0 || is_provisioning)
+    {
+        printf("Serving config page (%d bytes) of %d\n", config_html_len, tcp_sndbuf(tpcb));
 
-    pbuf_free(p);
-    in_recv_handler = false;
+        char header[256];
+        snprintf(header, sizeof(header), HEADER_HTML, config_html_len);
+
+        err_t h_err = tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
+        err_t d_err = tcp_write(tpcb, config_html, config_html_len, TCP_WRITE_FLAG_COPY);
+        // printf("Header send status: %d, Data send status: %d\n", h_err, d_err);
+
+        tcp_output(tpcb);
+        pbuf_free(p);
+        return ERR_OK;
+    }
+    // toggle pin
+    else if (strncmp(req, "GET /pio=", 9) == 0)
+    {
+        int pin = atoi(req+9);
+        printf("Todo: set settings value and then mark channel dirty. Toggling %d\n",pin);
+        toggle_pin(pin);
+
+        pbuf_free(p);
+        return ERR_OK;
+    }
+    // ignore favicon
+    else if (strncmp(req, "GET /favicon.ico", 16) == 0)
+    {
+        pbuf_free(p);
+        return ERR_OK;
+    }
+    // ignore favicon
+    else if (strncmp(req, "GET /addchannel", 15) == 0)
+    {
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    if (!posting)
+    {
+        printf("Request:%.20s\n", req);
+        // Dashboard (default)
+        printf("Serving dashboard page (%d bytes)\n", dashboard_html_len);
+        char header[256];
+        snprintf(header, sizeof(header), HEADER_HTML, dashboard_html_len);
+        tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
+        tcp_write(tpcb, dashboard_html, dashboard_html_len, TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+    }
     return ERR_OK;
 }
 
 static err_t http_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
-    if (err != ERR_OK || newpcb == NULL)
-        return ERR_MEM;
-
+    // Pass the config pointer (arg) down to the new connection
+    tcp_arg(newpcb, arg);
     tcp_recv(newpcb, http_recv_cb);
-    tcp_sent(newpcb, http_sent_cb);
-    tcp_nagle_disable(newpcb);
     return ERR_OK;
 }
 
-static struct tcp_pcb *listen_pcb = NULL;
-
-bool webserver_init(bool _provisioning, char * network_name) 
+void start_webserver(cJSON *config)
 {
-    provisioning = _provisioning;
-    static bool running = false;
-    if (running)
-        return true;
-    running = true;
+    struct tcp_pcb *pcb = tcp_new();
+    if (!pcb)
+        return;
 
-    provisioning = _provisioning;
-    //    settings = _settings;
+    // Bind the argument BEFORE listening
+    tcp_arg(pcb, config);
+    tcp_bind(pcb, IP_ADDR_ANY, PORT);
+    pcb = tcp_listen(pcb);
+    tcp_accept(pcb, http_accept_cb);
 
-    listen_pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
-    if (!listen_pcb)
-    {
-        printf("tcp_new failed\n");
-        return false;
-    }
-
-    err_t err = tcp_bind(listen_pcb, IP_ADDR_ANY, HTTP_PORT);
-    if (err != ERR_OK)
-    {
-        printf("tcp_bind failed: %d\n", err);
-        return false;
-    }
-
-    listen_pcb = tcp_listen_with_backlog(listen_pcb, TCP_DEFAULT_LISTEN_BACKLOG);
-    if (!listen_pcb)
-    {
-        printf("tcp_listen failed\n");
-        return false;
-    }
-
-    tcp_accept(listen_pcb, http_accept_cb);
-
-    printf("Web server listening on http://%s\n", network_name);
-
-    return true;
+    printf("http://%s:80\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
 }
 
- void webserver_push_update(const char *topic, const char *json_payload)
+// Call this from main loop to push updates
+void webserver_send_sse_update(cJSON *updates)
 {
-    // 1. Ensure client exists and isn't in a closing state
-    if (!sse_client || sse_client->state != ESTABLISHED)
-    {
+    if (!sse_pcb)
         return;
-    }
 
-    char sse_buffer[1024];
-    int len = snprintf(sse_buffer, sizeof(sse_buffer), "data: {\"%s\":%s}\r\n\r\n", topic, json_payload);
-
-    if (len < 0 || len >= sizeof(sse_buffer)) {
-        return;
-    }
-
-    cyw43_arch_lwip_begin();
-    
-    // 2. Strict check: only write if the entire length fits in the buffer
-    if (tcp_sndbuf(sse_client) >= len)
+    char payload[512] = "data: ";
+    if (cJSON_PrintPreallocated(updates, payload + strlen(payload), sizeof(payload) - strlen(payload), false))
     {
-        err_t err = tcp_write(sse_client, sse_buffer, len, TCP_WRITE_FLAG_COPY);
-        if (err == ERR_OK)
-        {
-            tcp_output(sse_client);
-        }
+        strcat(payload, "\n\n");
+        tcp_write(sse_pcb, payload, strlen(payload), TCP_WRITE_FLAG_COPY);
+        tcp_output(sse_pcb);
     }
-    
-    cyw43_arch_lwip_end();
 }

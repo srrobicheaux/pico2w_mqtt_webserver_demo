@@ -1,94 +1,160 @@
-#include "pico/cyw43_arch.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
 #include "pico/stdlib.h"
+#include "pico/cyw43_arch.h"
 #include "hardware/watchdog.h"
-
-#include "IOs.h"
-#include "mqtt_manager.h"
-#include "system_info.h"
-
+#include "networking.h"
+#include "io_manager.h"
+#include "flash_manager.h"
+#include "cJSON.h"
 #include "webserver.h"
-#include "wifi_provisioning.h"
-#include "flash.h"
+#include "mqtt_manager.h"
+
+void check_button(cJSON *root)
+{
+    if (!poll_bootsel_button())
+        return;
+
+    watchdog_disable();
+    // if more than ~5s held, reset settings
+    absolute_time_t LongPress = get_absolute_time() + 5000000; //~5seconds
+
+    while (poll_bootsel_button())
+        ;
+    if (time_reached(LongPress))
+    {
+        printf("Button held long enough, resetting settings.\n");
+        // create a version mismatch to factory reset
+        cJSON_SetNumberValue(cJSON_GetObjectItem(root, "version"), 0);
+
+        flash_save_settings(root);
+    }
+    else
+    {
+        printf("Short Button press, rebooting only.\n");
+    }
+    watchdog_reboot(0, 0, 1500);
+}
+
+bool timer_callback_webupdate_channels(repeating_timer_t *mst)
+{
+    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
+    cJSON *channels = cJSON_GetObjectItem(mqtt_state->config_root, "channels");
+
+    cJSON *updates = channel_updates(channels);
+    if (updates != NULL)
+    {
+        webserver_send_sse_update(updates);
+        cJSON_Delete(updates); // Free the updates object allocation
+    }
+
+    return true;
+}
+
+bool timer_callback_mqttupdate_channels(repeating_timer_t *mst)
+{
+    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
+    cJSON *channels = cJSON_GetObjectItem(mqtt_state->config_root, "channels");
+
+    cJSON *updates = channel_updates(channels);
+    if (updates != NULL)
+    {
+        mqtt_manager_publish_state(mst->user_data, updates);
+        cJSON_Delete(updates); // Free the updates object allocation
+    }
+
+    return true;
+}
+
+
+bool timer_callback_update_status(repeating_timer_t *mst)
+{
+    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
+    cJSON *system_update = system_channel_update();
+    if (system_update != NULL)
+    {
+        webserver_send_sse_update(system_update);
+        mqtt_manager_publish_state(mqtt_state, system_update);
+        cJSON_Delete(system_update); // Free the updates object allocation
+    }
+
+    return true;
+}
+
+bool timer_callback_check_config(repeating_timer_t *mst)
+{
+    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
+
+    // Handle Runtime Configuration Changes (The Webserver Dirty Bit)
+    // If user changes broker profiles via UI, gracefully recycle the connection
+    cJSON *dirty_node = cJSON_GetObjectItem(mqtt_state->config_root, "is_dirty");
+    if (dirty_node && cJSON_IsTrue(dirty_node))
+    {
+        printf("Config change detected. Cycling MQTT Engine...\n");
+
+        // Disconnect existing client if allocated
+        if (mqtt_state->mqtt_client_inst)
+        {
+            cyw43_arch_lwip_begin();
+            mqtt_disconnect(mqtt_state->mqtt_client_inst);
+            cyw43_arch_lwip_end();
+        }
+
+        // Re-initialize state machine with updated runtime settings object
+        mqtt_manager_init(mqtt_state, mqtt_state->config_root);
+
+        // Clear the dirty bit flag
+        cJSON_SetBoolValue(dirty_node, false);
+    }
+
+    // Run the background state engine continuously to handle async DNS and keep-alives
+    mqtt_manager_start(mqtt_state);
+}
 
 int main()
 {
-    bool connected = false;
-    DeviceSettings global_settings;
-    MQTT_CLIENT_DATA_T mqtt_client;
-
     stdio_init_all();
-    sleep_ms(2000);
+    sleep_ms(3000); // Allow time for USB serial to connect
 
-    watchdog_enable(60000, true);   // 1 minute watchdog
-    IO_init(&global_settings.IOs);
+    cJSON *settings = load_configuration();
+    cJSON *channels = cJSON_GetObjectItem(settings, "channels");
+    cJSON *wifi = cJSON_GetObjectItem(settings, "wifi");
+    watchdog_enable(60000,0);
 
-    printf("Figure out mqtt update of pio.\n");
-    while( !connected){
-        load_settings(&global_settings);
-        connected = wifi_init(&global_settings.wifi);
-        if (!connected) {
-            printf("WiFi connection failed. Retrying with defaults.\n");
-        }
+    bool on_wifi = wifi_init(
+        cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "ssid")),
+        cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "password")),
+        cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "network_name")));
+
+    watchdog_enable(10000,0);
+    start_webserver(settings);
+
+    // Safely zero memory and bind config pointers
+    MQTT_CLIENT_DATA_T mqtt_state;
+    mqtt_manager_init(&mqtt_state, settings);
+
+    io_init_all(channels);
+    uint32_t last_poll = 0;
+
+    static repeating_timer_t mst_mqttupdate_channels;
+    add_repeating_timer_ms(-2000, timer_callback_mqttupdate_channels, &mqtt_state, &mst_mqttupdate_channels);
+
+    static repeating_timer_t mst_webupdate_channels;
+    add_repeating_timer_ms(-50, timer_callback_webupdate_channels, &mqtt_state, &mst_webupdate_channels);
+
+    static repeating_timer_t mst_status;
+    add_repeating_timer_ms(-5000, timer_callback_update_status, &mqtt_state, &mst_status);
+
+    static repeating_timer_t mst_config;
+    add_repeating_timer_ms(-100, timer_callback_check_config, &mqtt_state, &mst_config);
+
+    while (true)
+    {
+        wifi_poll();
+        check_button(settings);
         watchdog_update();
     }
-
-
-    webserver_init(!connected, global_settings.wifi.network_name);
-    mqtt_init(&global_settings.wifi, &global_settings.mqtt, &mqtt_client);
-
-    uint32_t last_publish = 0;
-    uint32_t last_button_check = 0;
-    uint32_t button_press_start = 0;
-    bool button_was_pressed = false;
-
-    while (true) {
-        watchdog_update();
-        cyw43_arch_poll();
-
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-/*
-        // ============== Button Handling ==============
-        if (now - last_button_check > 50) {          // 50ms debounce
-            last_button_check = now;
-            bool pressed = get_bootsel_button();
-
-            if (pressed && !button_was_pressed) {
-                button_press_start = now;
-                button_was_pressed = true;
-            }
-            else if (!pressed && button_was_pressed) {
-                // Short press = reboot
-                if (now - button_press_start < 3000) {
-                    printf("Short BOOTSEL press - rebooting\n");
-                    reboot_device();
-                }
-                button_was_pressed = false;
-            }
-            else if (pressed && (now - button_press_start > 5000)) {
-                // Long press (>5s) = factory reset
-                printf("Long BOOTSEL press - factory reset!\n");
-                factory_reset();
-            }
-        }
-*/
-        // ============== Normal operation loops ==============
-
-        if (connected && (now - last_publish > 500)) {   // adjust interval
-            mqtt_manager_start(&mqtt_client, &global_settings.mqtt);
-
-            static char buffer[256];
-            IOs_JSON(buffer, sizeof(buffer));
-            webserver_push_update("IO", buffer);
-            mqtt_manager_publish(&mqtt_client, "/IO", buffer);
-
-            load_status_JSON(buffer);
-            webserver_push_update("system_status", buffer);
-            mqtt_manager_publish(&mqtt_client, "/system_status", buffer);
-
-            last_publish = now;
-        }
-
-        best_effort_wfe_or_timeout(make_timeout_time_ms(10));
-    }
- //   wifi_provisioning_start();
+    return 0;
 }

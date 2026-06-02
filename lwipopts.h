@@ -18,7 +18,7 @@
 #define LWIP_TCP 1
 #define TCP_MSS 1460
 #define TCP_WND (8 * TCP_MSS)
-#define TCP_SND_BUF (16 * TCP_MSS)
+#define TCP_SND_BUF (18 * TCP_MSS)
 #define TCP_SND_QUEUELEN (8 * TCP_SND_BUF / TCP_MSS)
 #define TCP_LISTEN_BACKLOG 1  // Allows queued connections
 

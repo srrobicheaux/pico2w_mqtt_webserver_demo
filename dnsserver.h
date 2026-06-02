@@ -1,1 +1,0 @@
-void dns_server_init();
