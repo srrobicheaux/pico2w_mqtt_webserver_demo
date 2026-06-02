@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pico MQTT with HA Discover Configuration</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            background-color: #F2F2F7;
+            color: #1C1C1E;
+            -webkit-font-smoothing: antialiased;
+        }
+        
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #C7C7CC; border-radius: 4px; }
+
+        .ios-group {
+            background: #FFFFFF;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+        .ios-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-bottom: 0.5px solid #E5E5EA;
+            background: #FFFFFF;
+            transition: background 0.15s;
+        }
+        .ios-row:last-child { border-bottom: none; }
+        .ios-label { font-size: 17px; font-weight: 400; color: #000000; text-transform: capitalize; }
+        .ios-input { font-size: 17px; color: #8E8E93; text-align: right; background: transparent; outline: none; border: none; width: 60%; }
+        .ios-input:focus { color: #007AFF; }
+        
+        .toggle-checkbox:checked { right: 0; border-color: #34C759; }
+        .toggle-checkbox:checked + .toggle-label { background-color: #34C759; }
+        .toggle-checkbox:checked + .toggle-label:after { transform: translateX(100%); border-color: white; }
+        
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body x-data="batmonConfig()" class="h-screen flex overflow-hidden">
+
+    <aside class="w-64 bg-[#F2F2F7] border-r border-[#E5E5EA] flex flex-col hidden md:flex z-10">
+        <div class="px-6 py-8">
+            <h1 class="text-2xl font-semibold tracking-tight">BatMon</h1>
+            <p class="text-xs text-gray-500 mt-1 uppercase tracking-wider font-semibold">Configuration</p>
+        </div>
+        <nav class="flex-1 px-4 space-y-2">
+            <template x-for="tab in tabs" :key="tab.id">
+                <button @click="currentTab = tab.id" 
+                    class="w-full flex items-center px-3 py-2 text-sm font-medium rounded-md transition-colors"
+                    :class="currentTab === tab.id ? 'bg-[#E5E5EA] text-black' : 'text-gray-600 hover:bg-gray-200/50'">
+                    <span x-text="tab.name"></span>
+                </button>
+            </template>
+        </nav>
+        <div class="p-4 border-t border-[#E5E5EA]">
+            <button @click="exportJSON()" class="w-full bg-[#007AFF] hover:bg-[#0056b3] text-white rounded-lg py-2.5 font-medium transition-colors shadow-sm mb-2">
+                Save to Device
+            </button>
+            <button @click="restartJSON()" class="w-full bg-[#FF3B30] hover:bg-[#D70015] text-white rounded-lg py-2.5 font-medium transition-colors shadow-sm">
+                Restart Device
+            </button>
+        </div>
+    </aside>
+
+    <main class="flex-1 overflow-y-auto relative bg-[#F2F2F7]">
+        <div class="max-w-3xl mx-auto px-4 py-8 pb-32">
+            
+            <h2 class="text-3xl font-bold mb-8 pl-2" x-text="tabs.find(t => t.id === currentTab).name"></h2>
+
+            <div x-show="currentTab === 'system'" x-cloak x-transition.opacity>
+                <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Device Identity</h3>
+                <div class="ios-group mb-8">
+                    <template x-for="key in ['version', 'position', 'device_id', 'device_name', 'model']">
+                        <div class="ios-row">
+                            <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
+                            <template x-if="typeof config[key] === 'number'">
+                                <input type="number" class="ios-input" x-model.number="config[key]">
+                            </template>
+                            <template x-if="typeof config[key] === 'string' || config[key] === null">
+                                <input type="text" class="ios-input" x-model="config[key]" @input="triggerDeviceTemplateUpdate()">
+                            </template>
+                        </div>
+                    </template>
+                </div>
+
+                <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Wi-Fi Network</h3>
+                <div class="ios-group mb-8">
+                    <template x-for="(value, key) in config.wifi">
+                        <div class="ios-row">
+                            <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
+                            <input :type="key.toLowerCase().includes('password') ? 'password' : 'text'" class="ios-input" x-model="config.wifi[key]">
+                        </div>
+                    </template>
+                </div>
+
+                <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">MQTT Broker</h3>
+                <div class="ios-group mb-8">
+                    <template x-for="(value, key) in config.mqtt">
+                        <div class="ios-row">
+                            <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
+                            <input :type="key.toLowerCase().includes('password') ? 'password' : 'text'" class="ios-input" x-model="config.mqtt[key]">
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <div x-show="currentTab === 'templates'" x-cloak x-transition.opacity>
+                <p class="text-sm text-[#8E8E93] ml-4 mb-6">Modifying these templates will change the default values applied when creating new channels.</p>
+                <template x-for="tpl in ['analog_template', 'pio_template']">
+                    <div class="mb-8" x-if="config[tpl]">
+                        <h3 class="text-[15px] font-semibold text-black uppercase tracking-wide ml-4 mb-2" x-text="tpl.replace('_', ' ')"></h3>
+                        
+                        <div class="ios-group mb-4">
+                            <template x-for="(value, key) in config[tpl]" :key="key">
+                                <template x-if="key !== 'ha'">
+                                    <div class="ios-row">
+                                        <span class="ios-label text-sm" x-text="key.replace(/_/g, ' ')"></span>
+                                        <template x-if="typeof value === 'boolean'">
+                                            <div class="relative inline-block w-12 mr-2 align-middle select-none">
+                                                <input type="checkbox" x-model="config[tpl][key]" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out"/>
+                                                <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                            </div>
+                                        </template>
+                                        <template x-if="typeof value === 'number'"><input type="number" class="ios-input" x-model.number="config[tpl][key]"></template>
+                                        <template x-if="typeof value === 'string'"><input type="text" class="ios-input" x-model="config[tpl][key]"></template>
+                                    </div>
+                                </template>
+                            </template>
+                        </div>
+
+                        <h4 class="text-[11px] text-[#8E8E93] uppercase tracking-wide ml-6 mb-2">Home Assistant Configurations (HA)</h4>
+                        <div class="ios-group border-l-4 border-[#007AFF]">
+                            <template x-for="(value, key) in config[tpl].ha" :key="key">
+                                <div class="ios-row">
+                                    <span class="ios-label text-sm text-gray-600" x-text="key.replace(/_/g, ' ')"></span>
+                                    <template x-if="typeof value === 'boolean'">
+                                        <div class="relative inline-block w-12 mr-2 align-middle select-none">
+                                            <input type="checkbox" x-model="config[tpl].ha[key]" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out"/>
+                                            <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                        </div>
+                                    </template>
+                                    <template x-if="typeof value === 'number'"><input type="number" class="ios-input" x-model.number="config[tpl].ha[key]"></template>
+                                    <template x-if="typeof value === 'string'"><input type="text" class="ios-input" x-model="config[tpl].ha[key]"></template>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <div x-show="currentTab === 'channels'" x-cloak x-transition.opacity>
+                <div class="flex justify-between items-end mb-4 px-4">
+                    <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide">Active Channels (<span x-text="config.channels ? config.channels.length : 0"></span>)</h3>
+                    <div class="space-x-2">
+                        <button @click="initNewChannel('analog')" class="text-sm font-medium text-[#007AFF] hover:text-[#0056b3]">+ Analog</button>
+                        <button @click="initNewChannel('pio')" class="text-sm font-medium text-[#007AFF] hover:text-[#0056b3]">+ Digital</button>
+                    </div>
+                </div>
+
+                <div class="ios-group">
+                    <template x-for="(channel, index) in config.channels" :key="index">
+                        <div class="ios-row cursor-pointer hover:bg-gray-50" @click="editChannel(index)">
+                            <div class="flex flex-col">
+                                <span class="font-medium text-[17px]" x-text="(channel.ha && channel.ha.name) ? channel.ha.name : 'Unnamed Channel'"></span>
+                                <span class="text-sm text-[#8E8E93]" x-text="(channel.is_digital ? 'Digital I/O' : 'Analog Sensor') + ' • Pin ' + channel.pin"></span>
+                            </div>
+                            <div class="flex items-center text-[#C7C7CC]">
+                                <span class="mr-3 text-sm" :class="channel.enabled ? 'text-[#34C759]' : 'text-[#FF3B30]'" x-text="channel.enabled ? 'Enabled' : 'Disabled'"></span>
+                                <svg width="10" height="16" viewBox="0 0 10 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 2L8 8L2 14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </div>
+                        </div>
+                    </template>
+                    <template x-if="!config.channels || config.channels.length === 0">
+                        <div class="p-8 text-center text-[#8E8E93]">No channels configured. Add one above.</div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div x-show="isEditing" class="fixed inset-0 z-50 flex justify-end" x-cloak>
+        <div x-show="isEditing" x-transition.opacity class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="isEditing = false"></div>
+        <div x-show="isEditing" 
+             x-transition:enter="transition ease-out duration-300"
+             x-transition:enter-start="translate-x-full"
+             x-transition:enter-end="translate-x-0"
+             x-transition:leave="transition ease-in duration-200"
+             x-transition:leave-start="translate-x-0"
+             x-transition:leave-end="translate-x-full"
+             class="relative w-full max-w-md h-full bg-[#F2F2F7] shadow-2xl overflow-y-auto border-l border-[#E5E5EA]">
+            
+            <div class="sticky top-0 z-10 bg-[#F2F2F7]/90 backdrop-blur-md border-b border-[#E5E5EA] px-4 py-3 flex justify-between items-center">
+                <button @click="isEditing = false" class="text-[#007AFF] text-[17px]">Cancel</button>
+                <h3 class="font-semibold text-[17px]" x-text="editIndex === -1 ? 'New Channel' : 'Edit Channel'"></h3>
+                <button @click="saveChannel()" class="text-[#007AFF] font-semibold text-[17px]">Done</button>
+            </div>
+
+            <div class="p-4 pb-20">
+                <h4 class="text-[12px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Hardware Driver Options</h4>
+                <div class="ios-group mb-6">
+                    <template x-for="(value, key) in activeEditorObject" :key="key">
+                        <template x-if="key !== 'ha'">
+                            <div class="ios-row">
+                                <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
+                                
+                                <template x-if="typeof value === 'boolean'">
+                                    <div class="relative inline-block w-12 mr-2 align-middle select-none">
+                                        <input type="checkbox" x-model="activeEditorObject[key]" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10"/>
+                                        <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer"></label>
+                                    </div>
+                                </template>
+                                
+                                <template x-if="typeof value === 'number'">
+                                    <input type="number" class="ios-input" x-model.number="activeEditorObject[key]">
+                                </template>
+                                
+                                <template x-if="typeof value === 'string'">
+                                    <input type="text" class="ios-input" x-model="activeEditorObject[key]" @input="editedFields[key] = true">
+                                </template>
+                            </div>
+                        </template>
+                    </template>
+                </div>
+                
+                <h4 class="text-[12px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Home Assistant Output</h4>
+                <div class="ios-group mb-6 border-l-4 border-[#007AFF]">
+                    <template x-for="(value, key) in activeEditorObject.ha" :key="key">
+                        <div class="ios-row">
+                            <span class="ios-label text-sm text-gray-600" x-text="key.replace(/_/g, ' ')"></span>
+                            
+                            <template x-if="typeof value === 'boolean'">
+                                <div class="relative inline-block w-12 mr-2 align-middle select-none">
+                                    <input type="checkbox" x-model="activeEditorObject.ha[key]" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10"/>
+                                    <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer"></label>
+                                </div>
+                            </template>
+                            
+                            <template x-if="typeof value === 'number'">
+                                <input type="number" class="ios-input" x-model.number="activeEditorObject.ha[key]">
+                            </template>
+                            
+                            <template x-if="typeof value === 'string'">
+                                <input type="text" class="ios-input" x-model="activeEditorObject.ha[key]" @input="editedFields.ha[key] = true">
+                            </template>
+                        </div>
+                    </template>
+                </div>
+                
+                <template x-if="editIndex !== -1">
+                    <button @click="deleteChannel()" class="w-full bg-white text-[#FF3B30] font-semibold text-[17px] py-3 rounded-xl ios-group text-center">
+                        Delete Channel
+                    </button>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function batmonConfig() {
+            return {
+                tabs: [
+                    { id: 'system', name: 'General Settings' },
+                    { id: 'templates', name: 'Channel Templates' },
+                    { id: 'channels', name: 'Hardware Channels' }
+                ],
+                currentTab: 'system',
+                config: {},
+                
+                isEditing: false,
+                editIndex: -1,
+                activeEditorObject: {},
+                editedFields: { ha: {} },
+                
+                init() {
+                    // Fallback configuration layout mapping your schema targets
+                    this.config = {
+                        "version": 13,
+                        "position": 0,
+                        "device_id": "E3C3D7106A914008",
+                        "device_name": "",
+                        "model": "",
+                        "readonly": ["device_id", "version"],
+                        "wifi": { "ssid": "ROBO", "password": "*****", "network_name": "batmon" },
+                        "mqtt": { "broker": "rpi4b.lan", "user": "shawn", "password": "*****" },
+                        "analog_template": {
+                            "pin": 26, "enabled": true, "is_digital": false, "is_dirty": true, "ratio": 1, "offset": 0,
+                            "ha": { "name": "Analog %d", "platform": "sensor", "device_class": "voltage", "state_class": "measurement", "unit_of_measurement": "V", "suggested_display_precision": 2, "value_template": "{{value}}", "unique_id": "%s_channel_%d", "expire_after": 10, "retention": 0, "availability_topic": "%s/status", "payload_available": "online", "payload_not_available": "offline", "qos": 0 }
+                        },
+                        "pio_template": {
+                            "pin": 1, "enabled": true, "is_digital": true, "is_output": false, "is_dirty": true,
+                            "ha": { "name": "Digital %d", "platform": "switch", "device_class": "switch", "payload_off": "OFF", "payload_on": "ON", "state_off": "OFF", "state_on": "ON", "command_topic": "%s/pin/%d", "state_topic": "%s/pin/%d", "unique_id": "%s_channel_%d", "availability_topic": "%s/status", "payload_available": "online", "payload_not_available": "offline", "expire_after": 10, "retention": 0, "qos": 0 }
+                        },
+                        "channels": []
+                    };
+
+                    fetch('/settings')
+                        .then(r => r.json())
+                        .then(data => {
+                            if(data && data.version) this.config = data;
+                        })
+                        .catch(e => console.log("Using default fallback structural JSON."));
+
+                    this.$watch('activeEditorObject.pin', (newVal) => {
+                        if (this.isEditing) {
+                            this.applyTemplates();
+                        }
+                    });
+                },
+
+                triggerDeviceTemplateUpdate() {
+                    if (this.isEditing) this.applyTemplates();
+                },
+
+                applyTemplates() {
+                    let typeTpl = this.activeEditorObject.is_digital ? this.config.pio_template : this.config.analog_template;
+                    let pin = this.activeEditorObject.pin || 0;
+                    let devId = this.config.device_id || 'UNKNOWN';
+
+                    // Hydrate root string options if any exist
+                    for (let key in this.activeEditorObject) {
+                        if (key === 'ha' || this.editedFields[key]) continue;
+                        let origStr = typeTpl[key];
+                        if (typeof origStr === 'string' && (origStr.includes('%d') || origStr.includes('%s'))) {
+                            this.activeEditorObject[key] = origStr.replace(/%d/g, pin).replace(/%s/g, devId);
+                        }
+                    }
+
+                    // Deep-hydrate configurations sitting inside the nested "ha" block
+                    if (this.activeEditorObject.ha && typeTpl.ha) {
+                        for (let key in this.activeEditorObject.ha) {
+                            if (this.editedFields.ha[key]) continue;
+                            let origStr = typeTpl.ha[key];
+                            if (typeof origStr === 'string' && (origStr.includes('%d') || origStr.includes('%s'))) {
+                                this.activeEditorObject.ha[key] = origStr.replace(/%d/g, pin).replace(/%s/g, devId);
+                            }
+                        }
+                    }
+                },
+
+                initNewChannel(type) {
+                    this.editIndex = -1;
+                    this.editedFields = { ha: {} }; 
+                    
+                    let specTemplate = type === 'analog' ? this.config.analog_template : this.config.pio_template;
+                    
+                    // Generate clean instance copy decoupled from the core global settings
+                    let newChan = JSON.parse(JSON.stringify(specTemplate));
+                    newChan.is_digital = (type === 'pio');
+                    
+                    this.activeEditorObject = newChan;
+                    this.applyTemplates(); 
+                    this.isEditing = true;
+                },
+
+                editChannel(index) {
+                    this.editIndex = index;
+                    this.editedFields = { ha: {} }; 
+                    
+                    let chanData = JSON.parse(JSON.stringify(this.config.channels[index]));
+                    
+                    // Populate tracker flags so existing text strings are preserved unless the pin shifts
+                    for(let key in chanData) {
+                        if (key === 'ha') {
+                            for(let hk in chanData.ha) this.editedFields.ha[hk] = true;
+                        } else {
+                            this.editedFields[key] = true;
+                        }
+                    }
+                    this.editedFields['pin'] = false; 
+
+                    this.activeEditorObject = chanData;
+                    this.isEditing = true;
+                },
+
+                saveChannel() {
+                    // Set the dirty flag to notify the back-end loop to reload configurations
+                    this.config.is_dirty = true;
+
+                    if (this.editIndex === -1) {
+                        this.config.channels.push(this.activeEditorObject);
+                    } else {
+                        this.config.channels[this.editIndex] = this.activeEditorObject;
+                    }
+                    this.isEditing = false;
+                },
+
+                deleteChannel() {
+                    if(confirm("Are you sure you want to delete this channel?")) {
+                        this.config.is_dirty = true;
+                        this.config.channels.splice(this.editIndex, 1);
+                        this.isEditing = false;
+                    }
+                },
+
+                exportJSON() {
+                    fetch('/save', { 
+                        method: 'POST', 
+                        headers: { 'Content-Length': JSON.stringify(this.config).length.toString() },
+                        body: JSON.stringify(this.config) 
+                    }).then(() => alert('Configuration Saved Successfully!'));
+                },
+                
+                restartJSON() {
+                    fetch('/restart', { method: 'POST' });
+                }
+            }
+        }
+    </script>
+</body>
+</html>

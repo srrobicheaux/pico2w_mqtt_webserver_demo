@@ -1,0 +1,74 @@
+{
+    "version": -1,
+    "position": 0,
+    "device_id": "E3C3D7106A914008",
+    "device_name": "BatMon System",
+    "model": "Pico 2W BatMon",
+    "readonly": [
+        "device_id",
+        "version"
+    ],
+    "wifi": {
+        "ssid": "BatMon",
+        "password": "",
+        "network_name": "batmon"
+    },
+    "mqtt": {
+        "broker": "homeassistant.lan",
+        "user": "ha_mqtt_user",
+        "password": ""
+    },
+    "analog_template": {
+        "pin": 26,
+        "value": 0,
+        "enabled": true,
+        "is_digital": false,
+        "is_dirty": true,
+        "ratio": 1,
+        "offset": 0,
+        "ha": {
+            "name": "Analog %d",
+            "platform": "sensor",
+            "device_class": "voltage",
+            "state_class": "measurement",
+            "unit_of_measurement": "V",
+            "suggested_display_precision": 2,
+            "value_template": "{{value}}",
+            "state_topic": "%s/pin/%d",
+            "unique_id": "%s_channel_%d",
+            "expire_after": 20,
+            "retention": 0,
+            "availability_topic": "%s/status",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+            "qos": 0
+        }
+    },
+    "pio_template": {
+        "pin": 1,
+        "value": 0,
+        "enabled": true,
+        "is_digital": true,
+        "is_output": false,
+        "is_dirty": true,
+        "ha": {
+            "name": "Digital %d",
+            "platform": "switch",
+            "device_class": "switch",
+            "payload_off": "OFF",
+            "payload_on": "ON",
+            "state_off": "OFF",
+            "state_on": "ON",
+            "command_topic": "%s/pin/%d",
+            "state_topic": "%s/pin/%d",
+            "unique_id": "%s_channel_%d",
+            "availability_topic": "%s/status",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+            "expire_after": 10,
+            "retention": 0,
+            "qos": 0
+        }
+    },
+    "channels": []
+}

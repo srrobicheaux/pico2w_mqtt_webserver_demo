@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BatMon | Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        /* Apple System / iOS Style Variables */
+        :root {
+            --bg-color: #F2F2F7;
+            --card-bg: #FFFFFF;
+            --text-primary: #1C1C1E;
+            --text-secondary: #8E8E93;
+            --accent-blue: #007AFF;
+            --accent-green: #34C759;
+            --accent-red: #FF3B30;
+            --border-color: #E5E5EA;
+            --shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            background: var(--bg-color); 
+            color: var(--text-primary); 
+            padding: 20px; 
+            display: flex; 
+            justify-content: center;
+            -webkit-font-smoothing: antialiased;
+        }
+        
+        .container { width: 100%; max-width: 1200px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        
+        header { 
+            grid-column: 1 / -1; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 5px; 
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        
+        .header-stats {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            background: var(--card-bg);
+            padding: 8px 16px;
+            border-radius: 10px;
+            border: 0.5px solid var(--border-color);
+            box-shadow: var(--shadow);
+        }
+        .sys-item { display: flex; gap: 6px; align-items: center; }
+        .sys-val { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+        
+        .live-indicator { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+        .dot { width: 8px; height: 8px; background-color: var(--text-secondary); border-radius: 50%; transition: background-color 0.3s; }
+        .dot.active { background-color: var(--accent-green); box-shadow: 0 0 6px rgba(52, 199, 89, 0.4); }
+
+        .card { 
+            background: var(--card-bg); 
+            border-radius: 16px; 
+            padding: 20px; 
+            border: 0.5px solid var(--border-color); 
+            box-shadow: var(--shadow);
+            display: flex; 
+            flex-direction: column; 
+            position: relative;
+        }
+        
+        .card-label { font-size: 13px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .card-value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.5px; }
+
+        .gauge-container { width: 100%; max-width: 140px; margin: 10px auto 15px auto; }
+        .gauge path.bg-arc { stroke: var(--bg-color); }
+        .gauge line.needle {
+            transform-origin: 50px 45px;
+            transition: transform 0.4s cubic-bezier(0.17, 0.67, 0.83, 0.67);
+            stroke: var(--accent-blue);
+        }
+
+        .full-width { grid-column: 1 / -1; }
+        .chart-container { min-height: 320px; }
+        .unit { font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-left: 4px; }
+        
+        .config-btn {
+            color: var(--accent-blue);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 600;
+            background: rgba(0, 122, 255, 0.1);
+            padding: 6px 14px;
+            border-radius: 8px;
+            transition: background 0.2s;
+        }
+        .config-btn:hover { background: rgba(0, 122, 255, 0.2); }
+
+        .gpio-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--bg-color);
+            padding: 8px 14px;
+            border-radius: 10px;
+            border: 0.5px solid var(--border-color);
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-primary);
+            transition: all 0.2s ease;
+        }
+
+        .gpio-badge.clickable { cursor: pointer; }
+        .gpio-badge.clickable:hover { background: rgba(0, 122, 255, 0.05); border-color: var(--accent-blue); }
+
+        @media (max-width: 900px) { .container { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 600px) { 
+            .container { grid-template-columns: 1fr; }
+            .header-stats { order: 3; width: 100%; justify-content: center; } 
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <div style="display: flex; flex-direction: column; gap: 2px;">
+                <h2 id="dev-model" style="font-size: 22px; font-weight: 700; letter-spacing: -0.5px;">BatMon</h2>
+                <span id="dev-id" style="font-size: 12px; color: var(--text-secondary); font-family: monospace;">ID: --</span>
+            </div>
+            
+            <div class="header-stats">
+                <div class="sys-item"><span>Version:</span><span id="sys-ver" class="sys-val">--</span></div>
+                <a href="/config" class="config-btn">Settings</a>
+            </div>
+
+            <div class="live-indicator">
+                <span id="rate-value">0 eps</span>
+                <div class="dot" id="conn-dot"></div> 
+                <span id="conn-text">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="card full-width" id="gpio-container" style="display: none;">
+            <div class="card-label">Digital Status</div>
+            <div id="gpio-badges" style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px;"></div>
+        </div>
+
+        <span id="analog-anchor" style="display: none;"></span>
+
+        <div class="card full-width chart-container">
+            <div class="card-label">Voltage History</div>
+            <div style="position: relative; flex-grow: 1; height: 100%;">
+                <canvas id="voltageChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+<script>
+    const MAX_POINTS = 60;
+    let frameCount = 0;
+    let lastRateCheck = Date.now();
+    let lastChartUpdate = 0;
+    
+    // A dictionary to route SSE pin numbers to the correct DOM elements and Chart datasets
+    const pinMap = {}; 
+    
+    function togglePio(pinNum) {
+        // Updated to use the actual pin number rather than an array index
+        fetch(`/pio=${pinNum}/toggle`)
+            .then(res => res.json())
+            .then(data => console.log(`Toggled Pin ${pinNum}:`, data))
+            .catch(err => console.error(`Toggle error on Pin ${pinNum}:`, err));
+    }
+
+    const ctx = document.getElementById('voltageChart').getContext('2d');
+    
+    // Apple-like Chart Colors
+    const chartColors = ['#007AFF', '#34C759', '#FF9500', '#AF52DE', '#FF3B30', '#5856D6'];
+
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: Array(MAX_POINTS).fill(''),
+            datasets: [] 
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            scales: { 
+                y: { 
+                    min: 0, max: 16, 
+                    grid: { color: '#E5E5EA' },
+                    ticks: { color: '#8E8E93', font: { family: '-apple-system' } }
+                }, 
+                x: { display: false } 
+            },
+            plugins: { legend: { labels: { color: '#1C1C1E', usePointStyle: true, boxWidth: 8, font: { family: '-apple-system', weight: '500' } } } }
+        }
+    });
+
+    // --- LOAD SETTINGS (Using new flattened JSON structure) ---
+    fetch('/settings')
+        .then(res => res.json())
+        .then(data => {
+            if(data.device_name || data.model) document.getElementById('dev-model').textContent = data.device_name || data.model;
+            if(data.version) document.getElementById('sys-ver').textContent = data.version;
+            if(data.device_id) document.getElementById('dev-id').textContent = 'ID: ' + data.device_id;
+
+            if(data.channels && Array.isArray(data.channels)) {
+                let analogHtml = '';
+                let digitalHtml = '';
+                let colorIdx = 0;
+                
+                data.channels.forEach(ch => {
+                    if(!ch.enabled) return;
+
+                    if(ch.is_digital) {
+                        // Setup Digital Channel mapping
+                        pinMap[ch.pin] = { type: 'digital' };
+                        
+//                        const isInput = !ch.is_output; //orig
+                        const isInput = ch.is_output;
+                        const clickAttr = isInput ? `onclick="togglePio(${ch.pin})" title="Toggle Pin ${ch.pin}"` : `title="Output Pin"`;
+                        const badgeClass = isInput ? 'gpio-badge clickable' : 'gpio-badge';
+                        
+                        digitalHtml += `
+                            <div class="${badgeClass}" ${clickAttr}>
+                                <div class="dot" id="dot-${ch.pin}"></div>
+                                <span>${ch.name || 'Pin ' + ch.pin}</span>
+                            </div>`;
+                    } else {
+                        // Setup Analog Channel mapping
+                        const dsIndex = chart.data.datasets.length;
+                        pinMap[ch.pin] = { type: 'analog', datasetIndex: dsIndex };
+                        const color = chartColors[colorIdx % chartColors.length];
+                        
+                        analogHtml += `
+                        <div class="card">
+                            <div class="card-label">${ch.name || 'Analog ' + ch.pin}</div>
+                            <div class="gauge-container">
+                                <svg viewBox="0 0 100 50" class="gauge">
+                                    <path class="bg-arc" d="M 10 45 A 40 40 0 0 1 90 45" fill="none" stroke-width="8" stroke-linecap="round"/>
+                                    <line class="needle" id="needle-${ch.pin}" x1="50" y1="45" x2="50" y2="10" stroke-width="3" stroke-linecap="round" style="transform: rotate(-90deg); stroke: ${color};"/>
+                                    <circle cx="50" cy="45" r="5" fill="${color}"/>
+                                </svg>
+                            </div>
+                            <div><span class="card-value" id="val-${ch.pin}">--.--</span><span class="unit">V</span></div>
+                        </div>`;
+
+                        chart.data.datasets.push({
+                            label: ch.name || `Pin ${ch.pin}`,
+                            borderColor: color,
+                            backgroundColor: color,
+                            data: Array(MAX_POINTS).fill(null),
+                            borderWidth: 2.5, pointRadius: 0, tension: 0.4
+                        });
+                        colorIdx++;
+                    }
+                });
+
+                if(digitalHtml) {
+                    document.getElementById('gpio-badges').innerHTML = digitalHtml;
+                    document.getElementById('gpio-container').style.display = 'block';
+                }
+                
+                if(analogHtml) {
+                    document.getElementById('analog-anchor').insertAdjacentHTML('beforebegin', analogHtml);
+                    chart.update();
+                }
+            }
+        });
+
+    // --- HANDLE STREAM (Using new flat array payload) ---
+    const evtSource = new EventSource('/events');
+    const connDot = document.getElementById('conn-dot');
+    const connText = document.getElementById('conn-text');
+
+    evtSource.onopen = () => { connDot.classList.add('active'); connText.textContent = "Live"; };
+
+evtSource.onmessage = (e) => {
+        try {
+            // Expected format: {"26": 0.5478, "28": 0.5027}
+            const payload = JSON.parse(e.data);
+            
+            // Safety check: ensure it's a valid object and not an empty array
+            if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return;
+            
+            frameCount++;
+
+            // Iterate through the key-value pairs in the dictionary
+            for (const [pinStr, val] of Object.entries(payload)) {
+                const pin = parseInt(pinStr, 10); // Convert string key back to integer
+                const mapInfo = pinMap[pin];
+                
+                if (!mapInfo) continue; // Ignore data for disabled/unknown pins
+
+                if (mapInfo.type === 'digital') {
+                    const dotEl = document.getElementById(`dot-${pin}`);
+                    if (dotEl) {
+                        val ? dotEl.classList.add('active') : dotEl.classList.remove('active');
+                    }
+                } 
+                else if (mapInfo.type === 'analog') {
+                    // Update Chart Data
+                    const ds = chart.data.datasets[mapInfo.datasetIndex];
+                    ds.data.push(val);
+                    ds.data.shift();
+                    
+                    // Update UI Text & Gauge
+                    const valEl = document.getElementById(`val-${pin}`);
+                    if (valEl) {
+                        valEl.textContent = val.toFixed(2);
+                        // Assuming 16V max for the arc calculation. 
+                        const angle = Math.max(-90, Math.min(90, (val / 16) * 180 - 90));
+                        document.getElementById(`needle-${pin}`).style.transform = `rotate(${angle}deg)`;
+                    }
+                }
+            }
+
+            // Throttle UI chart redraws to prevent CPU thrashing
+            if (Date.now() - lastChartUpdate > 250) {
+                chart.update();
+                lastChartUpdate = Date.now();
+            }
+
+            // Calculate EPS
+            if (Date.now() - lastRateCheck >= 1000) {
+                document.getElementById('rate-value').textContent = frameCount + " eps";
+                frameCount = 0;
+                lastRateCheck = Date.now();
+            }
+        } catch (err) {
+            // Silently ignore parse errors for partial chunks
+        }
+    };
+
+    evtSource.onerror = () => { connDot.classList.remove('active'); connText.textContent = "Offline"; };
+</script>
+</body>
+</html>
