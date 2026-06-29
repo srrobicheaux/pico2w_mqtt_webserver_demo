@@ -11,6 +11,16 @@
 #include "malloc.h"
 #include "pico/cyw43_arch.h"
 
+bool get_pin(int pin)
+{
+    if (pin < 4 ){
+        return cyw43_arch_gpio_get(pin);
+    }
+    else {
+        return gpio_get(pin);
+    }
+}
+
 bool toggle_pin(int pin)
 {
     int is_out = gpio_get_dir(pin);

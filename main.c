@@ -68,7 +68,6 @@ bool timer_callback_mqttupdate_channels(repeating_timer_t *mst)
     return true;
 }
 
-
 bool timer_callback_update_status(repeating_timer_t *mst)
 {
     MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
@@ -121,37 +120,48 @@ int main()
     cJSON *settings = load_configuration();
     cJSON *channels = cJSON_GetObjectItem(settings, "channels");
     cJSON *wifi = cJSON_GetObjectItem(settings, "wifi");
-    watchdog_enable(60000,0);
+    cJSON *mqtt = cJSON_GetObjectItem(settings, "mqtt");
 
     bool on_wifi = wifi_init(
         cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "ssid")),
         cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "password")),
         cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "network_name")));
 
-    watchdog_enable(10000,0);
+    watchdog_enable(180000, 0);
     start_webserver(settings);
+
+    int wifi_ms = cJSON_GetNumberValue(cJSON_GetObjectItem(wifi, "update_interval"));
+    int mqtt_ms = cJSON_GetNumberValue(cJSON_GetObjectItem(mqtt, "update_interval"));
 
     // Safely zero memory and bind config pointers
     MQTT_CLIENT_DATA_T mqtt_state;
     mqtt_manager_init(&mqtt_state, settings);
 
     io_init_all(channels);
-    uint32_t last_poll = 0;
 
     static repeating_timer_t mst_mqttupdate_channels;
-    add_repeating_timer_ms(-2000, timer_callback_mqttupdate_channels, &mqtt_state, &mst_mqttupdate_channels);
+    add_repeating_timer_ms(-mqtt_ms, timer_callback_mqttupdate_channels, &mqtt_state, &mst_mqttupdate_channels);
 
     static repeating_timer_t mst_webupdate_channels;
-    add_repeating_timer_ms(-50, timer_callback_webupdate_channels, &mqtt_state, &mst_webupdate_channels);
+    add_repeating_timer_ms(-wifi_ms, timer_callback_webupdate_channels, &mqtt_state, &mst_webupdate_channels);
 
     static repeating_timer_t mst_status;
     add_repeating_timer_ms(-5000, timer_callback_update_status, &mqtt_state, &mst_status);
 
     static repeating_timer_t mst_config;
-    add_repeating_timer_ms(-100, timer_callback_check_config, &mqtt_state, &mst_config);
+    add_repeating_timer_ms(-1000, timer_callback_check_config, &mqtt_state, &mst_config);
+
+    cJSON *dirty_bit = cJSON_GetObjectItem(settings, "is_dirty");
+    cJSON_SetBoolValue(dirty_bit, 0);
 
     while (true)
     {
+        if(cJSON_IsTrue(dirty_bit)){
+            printf("Saving...\n");
+            flash_save_settings();
+            cJSON_SetBoolValue(dirty_bit, 0);
+        }
+
         wifi_poll();
         check_button(settings);
         watchdog_update();

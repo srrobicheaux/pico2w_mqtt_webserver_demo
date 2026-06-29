@@ -9,21 +9,21 @@
 #define LWIP_NETCONN 0
 
 // Memory – critical for raw TCP server in AP mode
-#define MEM_LIBC_MALLOC 0  // Use libc malloc (required for poll mode)
+#define MEM_LIBC_MALLOC 1 //0 // Use libc malloc (required for poll mode)
 #define MEMP_MEM_MALLOC 1
 #define MEM_ALIGNMENT 4
-#define MEM_SIZE 65536  // 32KB minimum; bump to 65536 if OOM issues
+#define MEM_SIZE 32768 //65536  // 32KB minimum; bump to 65536 if OOM issues
 
 // TCP settings – essential for reliable HTTP
 #define LWIP_TCP 1
 #define TCP_MSS 1460
 #define TCP_WND (8 * TCP_MSS)
-#define TCP_SND_BUF (18 * TCP_MSS)
+#define TCP_SND_BUF (8 * TCP_MSS)
 #define TCP_SND_QUEUELEN (8 * TCP_SND_BUF / TCP_MSS)
 #define TCP_LISTEN_BACKLOG 1  // Allows queued connections
 
 // Pbufs – more for AP + multiple clients
-#define PBUF_POOL_SIZE 48
+#define PBUF_POOL_SIZE 64//48
 
 // Core protocols
 #define LWIP_DHCP 1  // For STA mode (AP DHCP is built-in to cyw43)

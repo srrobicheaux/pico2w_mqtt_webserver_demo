@@ -5,7 +5,7 @@
 #include "cJSON.h"
 
 bool toggle_pin(int pin);
-
+bool get_pin(int pin);
 void io_init_all(cJSON *channels);
 cJSON * system_channel_update();
 cJSON *channel_updates(cJSON *channels);

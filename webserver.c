@@ -4,10 +4,14 @@
 #include "lwip/tcp.h"
 #include "hardware/watchdog.h"
 #include "pico/stdlib.h"
+#include <stdlib.h> // Required for calloc/free
 #include "webserver.h"
 #include "flash_manager.h"
-#include "build/dashboard_html_embed.h"
-#include "build/config_html_embed.h"
+#include "build/config_embed.h"
+#include "build/dashboard_embed.h"
+#include "build/alpine.min_embed.h"
+#include "build/tailwind.min_embed.h"
+#include "build/chart_embed.h"
 #include "io_manager.h"
 #include <string.h>
 #include <stdio.h>
@@ -46,120 +50,188 @@ static struct tcp_pcb *sse_pcb = NULL;
     "Location: http://192.168.4.1/config\r\n" \
     "Connection: close\r\n\r\n"
 
-char buffer[4000];
+#define HEADER_HTML_GZIP                                     \
+    "HTTP/1.1 200 OK\r\n"                                    \
+    "Content-Type: text/html; charset=UTF-8\r\n"             \
+    "Content-Encoding: gzip\r\n"                             \
+    "Cache-Control: no-cache, no-store, must-revalidate\r\n" \
+    "Pragma: no-cache\r\n"                                   \
+    "Expires: 0\r\n"                                         \
+    "Connection: close\r\n"                                  \
+    "Content-Length: %d\r\n\r\n"
+
+// ==================== STATE MACHINE ====================
+
+// Tracks the state of chunked file transfers per connection
+typedef struct
+{
+    cJSON *config;
+    const uint8_t *file_data;
+    size_t total_len;
+    size_t bytes_sent;
+} http_state_t;
+
+// Sends the next chunk of data that fits in the lwIP buffer
+static void send_next_chunk(struct tcp_pcb *tpcb, http_state_t *state)
+{
+    if (!state->file_data || state->bytes_sent >= state->total_len)
+    {
+        return; // File transfer complete, wait for client to close socket
+    }
+
+    size_t bytes_left = state->total_len - state->bytes_sent;
+    size_t space_avail = tcp_sndbuf(tpcb);
+    size_t chunk = (bytes_left < space_avail) ? bytes_left : space_avail;
+
+    if (chunk > 0)
+    {
+        err_t err = tcp_write(tpcb, state->file_data + state->bytes_sent, chunk, TCP_WRITE_FLAG_COPY);
+        if (err == ERR_OK)
+        {
+            state->bytes_sent += chunk;
+            tcp_output(tpcb); // Fire immediately
+        }
+    }
+}
+
+// Callback triggered by lwIP whenever the client ACKs previous data
+static err_t http_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len)
+{
+    http_state_t *state = (http_state_t *)arg;
+    if (state)
+    {
+        send_next_chunk(tpcb, state);
+    }
+    return ERR_OK;
+}
+
+// Cleans up state memory if connection is aborted (e.g. RST from client)
+static void http_err_cb(void *arg, err_t err)
+{
+    if (arg)
+    {
+        free(arg);
+    }
+}
+
+// ==================== HTTP SERVER ====================
+
 static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
-    // TODO is_provisioning
+    static char buffer[5000];
+    char header[256];
+    static bool posting = false;
+    static int contentLength = 0;
+    static char *buffer_ptr;
+
+    http_state_t *state = (http_state_t *)arg;
     bool is_provisioning = false;
 
+    // Client closed the connection
     if (!p)
     {
+        if (tpcb == sse_pcb)
+            sse_pcb = NULL; // Prevent dangling pointer
+        // do we need to check if this free the json config object?  I think not, since it is managed by the main loop and not the webserver
+        if (state)
+            free(state);
         tcp_close(tpcb);
         return ERR_OK;
     }
 
-    static bool posting = false;
-    cJSON *config = (cJSON *)arg;
+    // maybe this should be p->len
+    tcp_recved(tpcb, p->len);
+    //    tcp_recved(tpcb, p->tot_len);
 
-    tcp_recved(tpcb, p->tot_len);
     char *req = (char *)p->payload;
 
-    static int contentLength = 0;
-    //    printf("Received request (%d bytes): %.20s ... %.20s\n", p->tot_len, req, req + p->tot_len - 20);
+    if (p->tot_len > sizeof(buffer) - 1)
+    {
+        printf("Buffer Overflow Averted!\n");
+        buffer[0] = '\0';
+        posting = false;
+        return ERR_MEM;
+    }
 
-    // POST save settings
+    // POST save settings reset
     if (strncmp(req, "GET ", 4) == 0)
     {
         posting = false;
         contentLength = 0;
+        buffer_ptr = buffer;
+    }
+    // POST save settings reset
+    if (strncmp(req, "POST ", 5) == 0)
+    {
+        posting = true;
+
+        // Content-Length: 1818
+
+        contentLength = atoi(strstr(req, "Content-Length: ") + 16);
+        buffer[0] = '\0';
+        buffer_ptr = buffer;
+    }
+    if (posting)
+    {
+        memcpy(buffer_ptr, p->payload, p->len);
+        buffer_ptr[p->len] = '\0';
+        buffer_ptr += p->len;
+
+        if (strlen(strstr(buffer, "\r\n\r\n") + 4) < contentLength)
+        {
+            tcp_output(tpcb);
+            pbuf_free(p);
+            return ERR_OK;
+        }
+        else
+        {
+            posting = false; // Reset for next request
+        }
+        req = buffer; // Redirect to the full buffer for processing
     }
 
+    //    printf("Request (%d bytes)\n", contentLength);
+
     // restart
-    if (strncmp(req, "POST /restart", 12) == 0)
+    if (strncmp(req, "POST /restart", 13) == 0)
     {
         printf("Rebooting from request\n");
-        watchdog_reboot(0, 0, 1500);
-
+        const char *resp = "{\"status\":\"ok\",\"message\":\"Rebooted.\"}";
+        snprintf(header, sizeof(header), HEADER_JSON, strlen(resp));
+        tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
+        tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
         pbuf_free(p);
+        watchdog_enable(10, 1);
         return ERR_OK;
     }
 
     if (strncmp(req, "POST /save", 10) == 0)
     {
-        posting = true;
-        buffer[0] = '\0';
-        contentLength = atoi(strstr(req, "Content-Length: ") + sizeof("Content-Length: ") - 1);
-        printf("Content-Length:%d\n", contentLength);
-        return ERR_OK;
-    }
+        buffer_ptr = strstr(req, "\r\n\r\n") + 4;
+        const char *resp = "";
 
-    if (posting)
-    {
-        // keep appending onto the end of buffer until you have Content-Length
-        int len = strlen(buffer) + p->tot_len;
-        if (len < sizeof(buffer))
+        int error = load_flash_buffer(buffer_ptr, contentLength, state->config);
+
+        if (error)
         {
-            memcpy(buffer + strlen(buffer), req, p->tot_len);
-            buffer[len] = '\0';
+            printf("Parse error near position %d in \n#%s#\n", error, buffer_ptr);
+            resp = "{\"status\":\"error\",\"message\":\"Failed to parse settings.\"}";
         }
         else
         {
-            printf("Buffer Overflow Overted!\n");
-            buffer[0] = '\0';
-            posting = false;
-            return ERR_MEM;
+            resp = "{\"status\":\"ok\",\"message\":\"Buffered.\"}";
+            cJSON_SetBoolValue(cJSON_GetObjectItem(state->config, "is_dirty"), 1);
         }
-
-        if (len == contentLength)
-        {
-            // position at the last of the received data that is the length of Content-Length
-            cJSON *new_values = cJSON_Parse(buffer + len - contentLength);
-            if (new_values)
-            {
-                printf("TODO: validate saving of passwords\n");
-                cJSON *new_wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(new_values, "wifi"), "password");
-                cJSON *old_wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "wifi"), "password");
-                if (strncmp(cJSON_GetStringValue(new_wifi_pw), "*****", 64) == 0)
-                {
-                    cJSON_SetValuestring(new_wifi_pw, cJSON_GetStringValue(old_wifi_pw));
-                }
-                cJSON *new_mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(new_values, "mqtt"), "password");
-                cJSON *old_mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "mqtt"), "password");
-                if (strncmp(cJSON_GetStringValue(new_mqtt_pw), "*****", 64) == 0)
-                {
-                    cJSON_SetValuestring(new_mqtt_pw, cJSON_GetStringValue(old_mqtt_pw));
-                }
-
-                cJSON_Delete(config);            // free the old config
-                flash_save_settings(new_values); // print json string to flash storage
-                config = load_configuration();
-                cJSON_Delete(new_values); // free the old config
-
-                posting = false;
-                buffer[0] = '\0';
-                contentLength = 0;
-
-                const char *resp = "{\"status\":\"ok\",\"message\":\"Saved.\"}";
-                char header[256];
-                snprintf(header, sizeof(header), HEADER_JSON, strlen(resp));
-                tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
-                tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
-                tcp_output(tpcb);
-                pbuf_free(p);
-                return ERR_OK;
-            }
-            else
-            {
-                printf("Buffer Error:%s\n", buffer);
-                cJSON_Delete(new_values);
-                pbuf_free(p);
-                return ERR_ABRT;
-            }
-            return ERR_OK;
-        }
+        snprintf(header, sizeof(header), HEADER_JSON, strlen(resp));
+        tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
+        tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
+        tcp_output(tpcb);
+        pbuf_free(p);
+        return ERR_OK;
     }
 
-    // Captive portal redirects (Apple, Android, etc.)
+    // Captive portal redirects
     else if (strstr(req, "captive.apple.com") || strstr(req, "hotspot-detect.html") || strstr(req, "connectivity-check"))
     {
         tcp_write(tpcb, HEADER_REDIRECT, strlen(HEADER_REDIRECT), TCP_WRITE_FLAG_COPY);
@@ -171,42 +243,46 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
     // Settings
     else if (strncmp(req, "GET /settings", 11) == 0)
     {
-        config = load_configuration();
-        // todo need to scrap passwords before sending config to client
-        // scrape passwords for setings response
-        char temp_wifi[64];
-        char temp_mqtt[64];
+        if (state)
+            state->config = load_configuration();
 
-        cJSON *wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "wifi"), "password");
-        cJSON *mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "mqtt"), "password");
-        strncpy(temp_wifi, cJSON_GetStringValue(wifi_pw), 64);
-        strncpy(temp_mqtt, cJSON_GetStringValue(mqtt_pw), 64);
+        char temp_wifi[64] = {0};
+        char temp_mqtt[64] = {0};
 
-        cJSON_SetValuestring(wifi_pw, "*****");
-        cJSON_SetValuestring(mqtt_pw, "*****");
+        cJSON *wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(state->config, "wifi"), "password");
+        cJSON *mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(state->config, "mqtt"), "password");
 
-        if (cJSON_PrintPreallocated(config, buffer, sizeof(buffer), 0))
+        if (wifi_pw)
         {
+            strncpy(temp_wifi, cJSON_GetStringValue(wifi_pw), 63);
+            cJSON_SetValuestring(wifi_pw, "*****");
+        }
+        if (mqtt_pw)
+        {
+            strncpy(temp_mqtt, cJSON_GetStringValue(mqtt_pw), 63);
+            cJSON_SetValuestring(mqtt_pw, "*****");
+        }
 
+        if (cJSON_PrintPreallocated(state->config, buffer, sizeof(buffer), 0))
+        {
             printf("Serving settings(%d bytes)\n", strlen(buffer));
-            char header[256];
             snprintf(header, sizeof(header), HEADER_HTML, strlen(buffer));
             tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
             tcp_write(tpcb, buffer, strlen(buffer), TCP_WRITE_FLAG_COPY);
             tcp_output(tpcb);
-            cJSON_SetValuestring(wifi_pw, temp_wifi);
-            cJSON_SetValuestring(mqtt_pw, temp_mqtt);
-
-            pbuf_free(p);
-            return ERR_OK;
         }
         else
         {
-            cJSON_SetValuestring(wifi_pw, temp_wifi);
-            cJSON_SetValuestring(mqtt_pw, temp_mqtt);
-            printf("Failed Serving settings(%d bytes)\n", strlen(buffer));
-            return ERR_MEM;
+            printf("Failed Serving settings\n");
         }
+
+        if (wifi_pw)
+            cJSON_SetValuestring(wifi_pw, temp_wifi);
+        if (mqtt_pw)
+            cJSON_SetValuestring(mqtt_pw, temp_mqtt);
+
+        pbuf_free(p);
+        return ERR_OK;
     }
 
     // start SSE Events
@@ -220,64 +296,151 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
         return ERR_OK; // Keep connection open
     }
 
-    // Config page
+    // Config page (Chunked)
     else if (strncmp(req, "GET /config", 11) == 0 || is_provisioning)
     {
-        printf("Serving config page (%d bytes) of %d\n", config_html_len, tcp_sndbuf(tpcb));
+        printf("Serving config page\n");
+        snprintf(header, sizeof(header), HEADER_HTML_GZIP, config_embed_gz_len);
 
-        char header[256];
-        snprintf(header, sizeof(header), HEADER_HTML, config_html_len);
+        tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+        state->file_data = config_embed_gz;
+        state->total_len = config_embed_gz_len;
+        state->bytes_sent = 0;
 
-        err_t h_err = tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
-        err_t d_err = tcp_write(tpcb, config_html, config_html_len, TCP_WRITE_FLAG_COPY);
-        // printf("Header send status: %d, Data send status: %d\n", h_err, d_err);
+        tcp_sent(tpcb, http_sent_cb);
+        send_next_chunk(tpcb, state);
 
-        tcp_output(tpcb);
         pbuf_free(p);
         return ERR_OK;
     }
+
     // toggle pin
     else if (strncmp(req, "GET /pio=", 9) == 0)
     {
-        int pin = atoi(req+9);
-        printf("Todo: set settings value and then mark channel dirty. Toggling %d\n",pin);
-        toggle_pin(pin);
-
-        pbuf_free(p);
-        return ERR_OK;
-    }
-    // ignore favicon
-    else if (strncmp(req, "GET /favicon.ico", 16) == 0)
-    {
-        pbuf_free(p);
-        return ERR_OK;
-    }
-    // ignore favicon
-    else if (strncmp(req, "GET /addchannel", 15) == 0)
-    {
-        pbuf_free(p);
-        return ERR_OK;
-    }
-
-    if (!posting)
-    {
-        printf("Request:%.20s\n", req);
-        // Dashboard (default)
-        printf("Serving dashboard page (%d bytes)\n", dashboard_html_len);
-        char header[256];
-        snprintf(header, sizeof(header), HEADER_HTML, dashboard_html_len);
+        int pin = atoi(req + 9);
+        printf("Toggling %d\n", pin);
+        bool bit = toggle_pin(pin);
+        char resp[30];
+        snprintf(resp, sizeof(resp), "{\"status\":%d,\"pio\":%d}", get_pin(pin), pin);
+        snprintf(header, sizeof(header), HEADER_JSON, strlen(resp));
         tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
-        tcp_write(tpcb, dashboard_html, dashboard_html_len, TCP_WRITE_FLAG_COPY);
+        tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
         tcp_output(tpcb);
         pbuf_free(p);
+        return ERR_OK;
     }
+
+    // ignore favicon / addchannel
+    else if (strncmp(req, "GET /favicon.ico", 16) == 0 || strncmp(req, "GET /addchannel", 15) == 0)
+    {
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    // Tailwind CSS (Chunked)
+    else if (strncmp(req, "GET /tailwind.min.js.gz", 23) == 0)
+    {
+        printf("Serving tailwind.min.js\n");
+        snprintf(header, sizeof(header),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/javascript\r\n"
+                 "Content-Encoding: gzip\r\n"
+                 "Cache-Control: max-age=31536000\r\n" // Improved cache
+                 "Connection: close\r\n"
+                 "Content-Length: %d\r\n\r\n",
+                 tailwind_min_embed_gz_len);
+
+        tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+        state->file_data = tailwind_min_embed_gz;
+        state->total_len = tailwind_min_embed_gz_len;
+        state->bytes_sent = 0;
+
+        tcp_sent(tpcb, http_sent_cb);
+        send_next_chunk(tpcb, state);
+
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    // Alpine.js (Chunked)
+    else if (strncmp(req, "GET /alpine.min.js.gz", 21) == 0)
+    {
+        printf("Serving alpine.min.js\n");
+        snprintf(header, sizeof(header),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/javascript\r\n"
+                 "Content-Encoding: gzip\r\n"
+                 "Cache-Control: max-age=31536000\r\n" // Improved cache
+                 "Connection: close\r\n"
+                 "Content-Length: %d\r\n\r\n",
+                 alpine_min_embed_gz_len);
+
+        tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+        state->file_data = alpine_min_embed_gz;
+        state->total_len = alpine_min_embed_gz_len;
+        state->bytes_sent = 0;
+
+        tcp_sent(tpcb, http_sent_cb);
+        send_next_chunk(tpcb, state);
+
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    // chart.js (Chunked)
+    else if (strncmp(req, "GET /chart.js.gz", 16) == 0)
+    {
+        printf("Serving chart.js\n");
+        snprintf(header, sizeof(header),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/javascript\r\n"
+                 "Content-Encoding: gzip\r\n"
+                 "Cache-Control: max-age=31536000\r\n" // Improved cache
+                 "Connection: close\r\n"
+                 "Content-Length: %d\r\n\r\n",
+                 chart_embed_gz_len);
+
+        tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+        state->file_data = chart_embed_gz;
+        state->total_len = chart_embed_gz_len;
+        state->bytes_sent = 0;
+
+        tcp_sent(tpcb, http_sent_cb);
+        send_next_chunk(tpcb, state);
+
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    // Dashboard (Chunked - default)
+    printf("Serving dashboard page\n");
+    snprintf(header, sizeof(header), HEADER_HTML_GZIP, dashboard_embed_gz_len);
+
+    tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+    state->file_data = dashboard_embed_gz;
+    state->total_len = dashboard_embed_gz_len;
+    state->bytes_sent = 0;
+
+    tcp_sent(tpcb, http_sent_cb);
+    send_next_chunk(tpcb, state);
+
+    pbuf_free(p);
     return ERR_OK;
 }
 
 static err_t http_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
-    // Pass the config pointer (arg) down to the new connection
-    tcp_arg(newpcb, arg);
+    // Allocate a state for this specific connection
+    http_state_t *state = calloc(1, sizeof(http_state_t));
+    if (!state)
+    {
+        return ERR_MEM; // Let lwIP gracefully refuse if out of heap
+    }
+
+    state->config = (cJSON *)arg; // Pass the global config down
+
+    tcp_arg(newpcb, state);
+    tcp_err(newpcb, http_err_cb);
     tcp_recv(newpcb, http_recv_cb);
     return ERR_OK;
 }
@@ -288,7 +451,7 @@ void start_webserver(cJSON *config)
     if (!pcb)
         return;
 
-    // Bind the argument BEFORE listening
+    // Bind the global config argument to the listening PCB
     tcp_arg(pcb, config);
     tcp_bind(pcb, IP_ADDR_ANY, PORT);
     pcb = tcp_listen(pcb);

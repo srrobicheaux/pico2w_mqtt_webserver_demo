@@ -7,7 +7,7 @@
 #include "cJSON.h"
 #include <string.h>
 #include "pico/stdlib.h"
-#include "build/default_config_json_embed.h"
+#include "build/default_config_embed.h"
 #include "pico/unique_id.h"
 
 void substitution(cJSON *root, int pin, const char *device_id)
@@ -71,22 +71,49 @@ void substitution(cJSON *root, int pin, const char *device_id)
     }
 }
 
-void flash_save_settings(cJSON *settings)
+uint8_t big_flash_buffer[FLASH_SETTING_SIZE];
+int load_flash_buffer(char *json_str, size_t length, cJSON *config)
 {
-    static uint8_t big_flash_buffer[FLASH_SETTING_SIZE];
-    memset(big_flash_buffer, 0, FLASH_SETTING_SIZE);
-    if (cJSON_PrintPreallocated(settings, big_flash_buffer, FLASH_SETTING_SIZE - 1, false))
+    cJSON *new_values = cJSON_ParseWithLength(json_str, length);
+    if (new_values)
     {
-        uint32_t ints = save_and_disable_interrupts();
-        flash_range_erase(FLASH_SETTINGS_OFFSET, FLASH_SETTING_SIZE);
-        flash_range_program(FLASH_SETTINGS_OFFSET, big_flash_buffer, FLASH_SETTING_SIZE);
-        restore_interrupts(ints);
-        printf("Saved: %s \t(length: %d)\n", settings->string, (int)strlen(big_flash_buffer));
+        cJSON *new_wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(new_values, "wifi"), "password");
+        cJSON *old_wifi_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "wifi"), "password");
+        if (new_wifi_pw && old_wifi_pw && strncmp(cJSON_GetStringValue(new_wifi_pw), "*****", 64) == 0)
+        {
+            cJSON_SetValuestring(new_wifi_pw, cJSON_GetStringValue(old_wifi_pw));
+        }
+        cJSON *new_mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(new_values, "mqtt"), "password");
+        cJSON *old_mqtt_pw = cJSON_GetObjectItem(cJSON_GetObjectItem(config, "mqtt"), "password");
+        if (new_mqtt_pw && old_mqtt_pw && strncmp(cJSON_GetStringValue(new_mqtt_pw), "*****", 64) == 0)
+        {
+            cJSON_SetValuestring(new_mqtt_pw, cJSON_GetStringValue(old_mqtt_pw));
+        }
+
+        memset(big_flash_buffer, 1, FLASH_SETTING_SIZE);
+        if (cJSON_PrintPreallocated(new_values, big_flash_buffer, FLASH_SETTING_SIZE - 1, false))
+        {
+            cJSON_Delete(new_values);
+            return 0;
+        }
     }
     else
     {
-        printf("Failed to Save Settings: %s \t(length: %d)\n", settings->string, (int)strlen(big_flash_buffer));
+        return (cJSON_GetErrorPtr() - json_str + 1);
     }
+}
+
+void flash_save_settings()
+{
+    //        printf("Size: %d\n", strlen(big_flash_buffer));
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(FLASH_SETTINGS_OFFSET, FLASH_SETTING_SIZE);
+    flash_range_program(FLASH_SETTINGS_OFFSET, big_flash_buffer, FLASH_SETTING_SIZE);
+    restore_interrupts(ints);
+    printf("Saved Settings\n");
+
+    //                uintptr_t params[] = {FLASH_SETTINGS_OFFSET, (uintptr_t) big_flash_buffer, FLASH_SETTING_SIZE};
+    //        int rc = flash_safe_execute((void *) flash_range_program, params, UINT32_MAX);
 }
 
 cJSON *load_configuration(void)
@@ -95,7 +122,6 @@ cJSON *load_configuration(void)
     //    printf("Config:\n%.4000s\n",json);
 
     cJSON *root = cJSON_Parse(json);
-
     if (root)
     {
         int version = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "version"));
@@ -123,7 +149,7 @@ cJSON *load_configuration(void)
     }
 
     printf("Performing factory reset.\n");
-    root = cJSON_Parse(default_config_json);
+    root = cJSON_ParseWithLength(default_config_embed, default_config_embed_len);
     if (root)
     {
         flash_save_settings(root);
@@ -135,4 +161,3 @@ cJSON *load_configuration(void)
     root = cJSON_Parse("{}");
     return root;
 }
-

@@ -1,6 +1,7 @@
 {
     "version": -1,
     "position": 0,
+    "is_dirty": true,
     "device_id": "E3C3D7106A914008",
     "device_name": "BatMon System",
     "model": "Pico 2W BatMon",
@@ -9,14 +10,16 @@
         "version"
     ],
     "wifi": {
-        "ssid": "BatMon",
+        "ssid": "",
         "password": "",
-        "network_name": "batmon"
+        "network_name": "batmon",
+        "update_interval": 50
     },
     "mqtt": {
         "broker": "homeassistant.lan",
-        "user": "ha_mqtt_user",
-        "password": ""
+        "user": "shawn",
+        "password": "1808ParkPlace!",
+        "update_interval": 2000
     },
     "analog_template": {
         "pin": 26,

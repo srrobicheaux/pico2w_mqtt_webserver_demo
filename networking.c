@@ -2,6 +2,7 @@
 #include "pico/cyw43_arch.h"
 #include "lwip/prot/dns.h"
 #include "networking.h"
+#include "hardware/watchdog.h"
 
 #define DNS_PORT 53
 #define DHCP_PORT_SERVER 67
@@ -296,33 +297,39 @@ bool wifi_init(const char *ssid, const char *password, const char *network_name)
     if (cyw43_arch_init())
     {
         printf("WiFi init failed\n\n");
+        return false;
     }
-
-    bool wifi_available = (strlen(ssid) != 0);
     if (strlen(network_name) == 0)
     {
         network_name = "batmon";
     }
-    // Set the hostname for DHCP requests
+    cyw43_arch_lwip_begin();
 
-    if (wifi_available)
+    //error if no SSID provided, otherwise try connecting to WiFi and fall back to AP mode if it fails after multiple attempts
+    int error= (strlen(ssid) == 0);
+    if (!error)
     {
-        cyw43_arch_enable_sta_mode();
         struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
         netif_set_hostname(n, network_name);
-        wifi_available=false;
 
+        cyw43_arch_enable_sta_mode();
         printf("SSID %s:", ssid);
-        int timeout = 20;
-        while (!wifi_available && timeout < 60)
+        int timeout = 10;
+        error = PICO_ERROR_TIMEOUT;
+        while (error != PICO_ERROR_NONE && timeout < 60)
         {
-            printf("(%ds timeout).\t", timeout);
-            fflush(stdout);
-            wifi_available = (cyw43_arch_wifi_connect_timeout_ms(ssid, password, CYW43_AUTH_WPA3_WPA2_AES_PSK, timeout * 1000) == 0);
-            timeout = timeout + 10;
+            watchdog_update();
+            printf("(%ds timeout).\n\t", timeout);
+            error = cyw43_arch_wifi_connect_timeout_ms(ssid, password, CYW43_AUTH_WPA3_WPA2_AES_PSK, timeout * 1000);
+            if(error == PICO_ERROR_TIMEOUT){
+                timeout = timeout * 2;
+            }
+            else {
+                timeout = 61; // if not a timeout then exit out of loop
+            }
         }
     }
-    if (!wifi_available)
+    if (error != PICO_ERROR_NONE)
     {
         printf("Starting AP: %s (Open)\n", network_name);
         cyw43_arch_enable_ap_mode(network_name, NULL, CYW43_AUTH_OPEN);
@@ -333,12 +340,12 @@ bool wifi_init(const char *ssid, const char *password, const char *network_name)
     else
     {
         printf("\nConnected @ http://%s or ", network_name);
-
         // Disable power management for better responsiveness
-        cyw43_arch_lwip_begin();
         cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
     }
 
+printf("WiFi initialization complete\n");
+
     cyw43_arch_lwip_end();
-    return wifi_available;
+    return (error == PICO_ERROR_NONE);
 }

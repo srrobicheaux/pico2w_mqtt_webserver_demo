@@ -1,34 +1,80 @@
 #!/bin/bash
-set -e  # Exit immediately if any command fails
+set -e
 
-echo "=== Embedding assets ==="
+echo "=== Embedding assets with minify + gzip ==="
 
-# Create directories
 mkdir -p assets
 mkdir -p build
 
-# Loop through all files in assets/ and embed them into build/
+# wget -O ./assets/tailwind.min.js https://cdn.tailwindcss.com
+# wget --compression=gzip -q -O - https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js > ./assets/alpine.min.js
+
+# Optional: sudo npm install -g html-minifier
+# Optional: sudo apt install jq -y
+
 for file in assets/*; do
     if [ -f "$file" ]; then
         filename=$(basename "$file")
-        base_name="${filename//./_}"                    # Remove extension
-        var_name="${base_name//[^a-zA-Z0-9_]/_}"      # Sanitize for C variable
+        base_name="${filename%.*}"
+        ext="${filename##*.}"
+        var_name="${base_name//[^a-zA-Z0-9_]/_}_embed"
         
         output_header="build/${base_name}_embed.h"
         
-        echo "Embedding: $file → $output_header"
+        echo "Processing: $file"
+
+        if [[ "$ext" == "html" || "$ext" == "css" || "$ext" == "js" ]]; then
+            echo "  → Minifying + gzipping ($ext)..."
+            minified="build/${filename}.min"
+            
+            if [[ "$ext" == "html" ]]; then
+                html-minifier --collapse-whitespace --remove-comments "$file" -o "$minified"
+#                html-minifier --collapse-whitespace --remove-comments --minify-css --minify-js "$file" -o "$minified"
+            else
+                cp "$file" "$minified"
+            fi
+            
+            gzip -9 -c "$minified" > "build/${filename}.gz"
+            rm -f "$minified"
+            
+            input_for_xxd="build/${filename}.gz"
+            final_var_name="${var_name}_gz"
+            
+        elif [[ "$ext" == "json" ]]; then
+            echo "  → Minifying JSON only (no gzip for cJSON compatibility)..."
+            minified="build/${filename}.min"
+            
+            if command -v jq >/dev/null 2>&1; then
+#                cp "$file" "$minified"
+                jq -c . "$file" > "$minified"
+            else
+                cp "$file" "$minified"
+            fi
+            
+            input_for_xxd="$minified"
+            final_var_name="${var_name}"
+        else
+            echo "  → Embedding raw"
+            input_for_xxd="$file"
+            final_var_name="${var_name}"
+        fi
+
+        echo "  → Embedding as $final_var_name"
         echo -n "static const " > "$output_header"
-        xxd -i -n "${var_name}" "$file" >> "$output_header"
+        xxd -i -n "$final_var_name" "$input_for_xxd" >> "$output_header"
+        
+        # Metadata
+        {
+            echo ""
+#            echo "static const unsigned int ${final_var_name}_len = $(wc -c < "$input_for_xxd");"
+            echo "// Processed size: $(wc -c < "$input_for_xxd") bytes"
+        } >> "$output_header"
     fi
 done
 
-echo "=== Building project ==="
-
+echo "=== Building and flashing ==="
 cd build
-
-# Reconfigure cmake if needed (in case new headers appear)
 cmake ..
-
 make -j4
 
 echo "=== Starting Serial Monitor ==="
