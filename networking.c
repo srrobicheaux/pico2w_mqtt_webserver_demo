@@ -314,7 +314,7 @@ bool wifi_init(const char *ssid, const char *password, const char *network_name)
 
         cyw43_arch_enable_sta_mode();
         printf("SSID %s:", ssid);
-        int timeout = 10;
+        int timeout = 15;
         error = PICO_ERROR_TIMEOUT;
         while (error != PICO_ERROR_NONE && timeout < 60)
         {

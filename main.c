@@ -11,6 +11,7 @@
 #include "cJSON.h"
 #include "webserver.h"
 #include "mqtt_manager.h"
+#include "malloc.h"
 
 void check_button(cJSON *root)
 {
@@ -40,87 +41,81 @@ void check_button(cJSON *root)
 
 bool timer_callback_webupdate_channels(repeating_timer_t *mst)
 {
-    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
-    cJSON *channels = cJSON_GetObjectItem(mqtt_state->config_root, "channels");
+    cJSON *channels = (cJSON *)mst->user_data;
+    if (!channels)
+        return true;
 
-    cJSON *updates = channel_updates(channels);
-    if (updates != NULL)
+    char payload[512] = "data: {";
+    char *pos = payload + strlen(payload);
+
+    int index = 0;
+    cJSON *item = NULL;
+
+    cJSON_ArrayForEach(item, channels)
     {
-        webserver_send_sse_update(updates);
-        cJSON_Delete(updates); // Free the updates object allocation
+        cJSON *ptr_value = cJSON_GetObjectItem(item, "value");
+
+        if (ptr_value)
+        {
+            float val = (float)cJSON_GetNumberValue(ptr_value);
+            size_t rem = sizeof(payload) - (pos - payload);
+
+            int written = snprintf(pos, rem, "\"%d\":%.2f,", index, val);
+            if (written > 0 && (size_t)written < rem)
+            {
+                pos += written;
+            }
+        }
+        index++;
     }
+
+    // Replace trailing comma with closing brace and SSE newlines
+    if (*(pos - 1) == ',')
+    {
+        pos--;
+    }
+    snprintf(pos, sizeof(payload) - (pos - payload), "}\n\n");
+    cyw43_arch_lwip_begin();
+    webserver_send_sse_update(payload);
+    cyw43_arch_lwip_end();
 
     return true;
 }
 
 bool timer_callback_mqttupdate_channels(repeating_timer_t *mst)
 {
-    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
-    cJSON *channels = cJSON_GetObjectItem(mqtt_state->config_root, "channels");
+    MQTT_CLIENT_DATA_T *system_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
+    //    cJSON *channels = cJSON_GetObjectItem(system_state->config_root, "channels");
 
-    cJSON *updates = channel_updates(channels);
-    if (updates != NULL)
-    {
-        mqtt_manager_publish_state(mst->user_data, updates);
-        cJSON_Delete(updates); // Free the updates object allocation
-    }
-
+    cyw43_arch_lwip_begin();
+    mqtt_manager_publish_state(system_state);
+    cyw43_arch_lwip_end();
     return true;
 }
 
-bool timer_callback_update_status(repeating_timer_t *mst)
-{
-    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
-    cJSON *system_update = system_channel_update();
-    if (system_update != NULL)
-    {
-        webserver_send_sse_update(system_update);
-        mqtt_manager_publish_state(mqtt_state, system_update);
-        cJSON_Delete(system_update); // Free the updates object allocation
-    }
+extern char __StackLimit, __bss_end__;
 
-    return true;
-}
 
-bool timer_callback_check_config(repeating_timer_t *mst)
-{
-    MQTT_CLIENT_DATA_T *mqtt_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
-
-    // Handle Runtime Configuration Changes (The Webserver Dirty Bit)
-    // If user changes broker profiles via UI, gracefully recycle the connection
-    cJSON *dirty_node = cJSON_GetObjectItem(mqtt_state->config_root, "is_dirty");
-    if (dirty_node && cJSON_IsTrue(dirty_node))
-    {
-        printf("Config change detected. Cycling MQTT Engine...\n");
-
-        // Disconnect existing client if allocated
-        if (mqtt_state->mqtt_client_inst)
-        {
-            cyw43_arch_lwip_begin();
-            mqtt_disconnect(mqtt_state->mqtt_client_inst);
-            cyw43_arch_lwip_end();
-        }
-
-        // Re-initialize state machine with updated runtime settings object
-        mqtt_manager_init(mqtt_state, mqtt_state->config_root);
-
-        // Clear the dirty bit flag
-        cJSON_SetBoolValue(dirty_node, false);
-    }
-
-    // Run the background state engine continuously to handle async DNS and keep-alives
-    mqtt_manager_start(mqtt_state);
-}
+//Todo List (Backlog):
+//Allow multiple WiFI networks to be stored and cycled through on connection failure
+//Add a "reset to factory defaults" button on the webserver page
+//Factory reset if button held for 5 seconds on boot
+//Monitor network disconnects and attempt to reconnect automatically
+//If nework connection isnt successful after 30 seconds, Enter AP mode.
+//If AP mode without configuration for 5 minutes, reboot and try connections again.
+//Log analog values to flash and allow download of CSV file from webserver
+//seperate MQTT and Webserver into their own threads to avoid blocking each other
+//seperate Analog and Diagnostic channels into their own website areas
+//fix network naming to be more user friendly (currently uses Picow for SSID and network name)
 
 int main()
 {
     stdio_init_all();
-    sleep_ms(3000); // Allow time for USB serial to connect
+    load_configuration(); // Populates g_config
 
-    cJSON *settings = load_configuration();
-    cJSON *channels = cJSON_GetObjectItem(settings, "channels");
-    cJSON *wifi = cJSON_GetObjectItem(settings, "wifi");
-    cJSON *mqtt = cJSON_GetObjectItem(settings, "mqtt");
+    cJSON *channels = cJSON_GetObjectItem(g_config, "channels");
+    cJSON *wifi = cJSON_GetObjectItem(g_config, "wifi");
+    cJSON *mqtt = cJSON_GetObjectItem(g_config, "mqtt");
 
     bool on_wifi = wifi_init(
         cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "ssid")),
@@ -128,42 +123,78 @@ int main()
         cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "network_name")));
 
     watchdog_enable(180000, 0);
-    start_webserver(settings);
+    start_webserver(g_config);
 
-    int wifi_ms = cJSON_GetNumberValue(cJSON_GetObjectItem(wifi, "update_interval"));
-    int mqtt_ms = cJSON_GetNumberValue(cJSON_GetObjectItem(mqtt, "update_interval"));
-
-    // Safely zero memory and bind config pointers
-    MQTT_CLIENT_DATA_T mqtt_state;
-    mqtt_manager_init(&mqtt_state, settings);
-
+    MQTT_CLIENT_DATA_T system_state;
+    mqtt_manager_init(&system_state, g_config);
     io_init_all(channels);
+    mqtt_manager_start(&system_state);
 
     static repeating_timer_t mst_mqttupdate_channels;
-    add_repeating_timer_ms(-mqtt_ms, timer_callback_mqttupdate_channels, &mqtt_state, &mst_mqttupdate_channels);
+    add_repeating_timer_ms(2000, timer_callback_mqttupdate_channels, &system_state, &mst_mqttupdate_channels);
 
     static repeating_timer_t mst_webupdate_channels;
-    add_repeating_timer_ms(-wifi_ms, timer_callback_webupdate_channels, &mqtt_state, &mst_webupdate_channels);
-
-    static repeating_timer_t mst_status;
-    add_repeating_timer_ms(-5000, timer_callback_update_status, &mqtt_state, &mst_status);
-
-    static repeating_timer_t mst_config;
-    add_repeating_timer_ms(-1000, timer_callback_check_config, &mqtt_state, &mst_config);
-
-    cJSON *dirty_bit = cJSON_GetObjectItem(settings, "is_dirty");
-    cJSON_SetBoolValue(dirty_bit, 0);
+    add_repeating_timer_ms(500, timer_callback_webupdate_channels, channels, &mst_webupdate_channels);
 
     while (true)
     {
-        if(cJSON_IsTrue(dirty_bit)){
-            printf("Saving...\n");
-            flash_save_settings();
-            cJSON_SetBoolValue(dirty_bit, 0);
-        }
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
+        best_effort_wfe_or_timeout(make_timeout_time_ms(100));
+
+        if (g_config_dirty)
+        {
+            // 1. Pause repeating timers so ISR callbacks do not access freed JSON
+            cancel_repeating_timer(&mst_webupdate_channels);
+            cancel_repeating_timer(&mst_mqttupdate_channels);
+
+            if (g_pending_config)
+            {
+                // 2. Commit new configuration to physical flash
+                flash_save_settings(g_pending_config);
+
+                // 3. Swap root pointers safely
+                if (g_config)
+                    cJSON_Delete(g_config);
+                g_config = g_pending_config;
+                g_pending_config = NULL;
+
+                // 4. Update local sub-node pointers
+                channels = cJSON_GetObjectItem(g_config, "channels");
+                wifi = cJSON_GetObjectItem(g_config, "wifi");
+                mqtt = cJSON_GetObjectItem(g_config, "mqtt");
+
+                // 4b. Pass the new pointer to the webserver!
+                webserver_update_config(g_config);
+            }
+
+            g_config_dirty = false;
+
+            webserver_send_sse_update("data: {\"MESSAGE\":\"Settings have changed. Refresh to load them.\"}\n\n");
+            printf("Config change detected. Re-initializing subsystems...\n");
+
+            // 5. Re-initialize IO and MQTT with fresh pointers
+            io_init_all(channels);
+
+            if (system_state.mqtt_client_inst)
+            {
+                cyw43_arch_lwip_begin();
+                mqtt_disconnect(system_state.mqtt_client_inst);
+                cyw43_arch_lwip_end();
+            }
+
+            mqtt_manager_init(&system_state, g_config);
+            mqtt_manager_start(&system_state);
+
+            // 6. Restart hardware timers with updated target pointers
+            add_repeating_timer_ms(2000, timer_callback_mqttupdate_channels, &system_state, &mst_mqttupdate_channels);
+            add_repeating_timer_ms(500, timer_callback_webupdate_channels, channels, &mst_webupdate_channels);
+        }
         wifi_poll();
-        check_button(settings);
+        check_button(g_config);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+
+        channel_updates(channels);
         watchdog_update();
     }
     return 0;

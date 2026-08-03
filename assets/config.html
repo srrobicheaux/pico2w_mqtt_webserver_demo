@@ -4,9 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pico MQTT with HA Discover Configuration</title>
-    <script src="/tailwind.min.js.gz"></script>
-    <script defer src="/alpine.min.js.gz"></script>
+    <title>BatMon Configuration</title>
+    <script src="/tailwind.min.js"></script>
+    <script defer src="/alpine.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -127,22 +127,16 @@
             <div x-show="currentTab === 'system'" x-cloak x-transition.opacity>
                 <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Device Identity</h3>
                 <div class="ios-group mb-8">
-                    <template x-for="key in ['version', 'position', 'device_id', 'device_name', 'model']">
-                        <div class="ios-row">
+                    <template x-for="key in ['version', 'position', 'device_id', 'model']">
+                        <div class="ios-row" x-show="config[key] !== undefined">
                             <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
-                            <template x-if="typeof config[key] === 'number'">
-                                <input type="number" class="ios-input" x-model.number="config[key]">
-                            </template>
-                            <template x-if="typeof config[key] === 'string' || config[key] === null">
-                                <input type="text" class="ios-input" x-model="config[key]"
-                                    @input="triggerDeviceTemplateUpdate()">
-                            </template>
+                            <span class="ios-label" x-text="config[key]"></span>
                         </div>
                     </template>
                 </div>
 
                 <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Wi-Fi Network</h3>
-                <div class="ios-group mb-8">
+                <div class="ios-group mb-8" x-if="config.wifi">
                     <template x-for="(value, key) in config.wifi">
                         <div class="ios-row">
                             <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
@@ -153,7 +147,7 @@
                 </div>
 
                 <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">MQTT Broker</h3>
-                <div class="ios-group mb-8">
+                <div class="ios-group mb-8" x-if="config.mqtt">
                     <template x-for="(value, key) in config.mqtt">
                         <div class="ios-row">
                             <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
@@ -167,7 +161,9 @@
             <div x-show="currentTab === 'templates'" x-cloak x-transition.opacity>
                 <p class="text-sm text-[#8E8E93] ml-4 mb-6">Modifying these templates will change the default values
                     applied when creating new channels.</p>
-                <template x-for="tpl in ['analog_template', 'pio_template']">
+                
+                <!-- Dynamically discover templates from JSON keys -->
+                <template x-for="tpl in Object.keys(config).filter(k => k.endsWith('_template'))" :key="tpl">
                     <div class="mb-8" x-if="config[tpl]">
                         <h3 class="text-[15px] font-semibold text-black uppercase tracking-wide ml-4 mb-2"
                             x-text="tpl.replace('_', ' ')"></h3>
@@ -181,38 +177,38 @@
                                             <div class="relative inline-block w-12 mr-2 align-middle select-none">
                                                 <input type="checkbox" x-model="config[tpl][key]"
                                                     class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out" />
-                                                <label
-                                                    class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                                <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
                                             </div>
                                         </template>
-                                        <template x-if="typeof value === 'number'"><input type="number"
-                                                class="ios-input" x-model.number="config[tpl][key]"></template>
-                                        <template x-if="typeof value === 'string'"><input type="text" class="ios-input"
-                                                x-model="config[tpl][key]"></template>
+                                        <template x-if="typeof value === 'number'">
+                                            <input type="number" class="ios-input" x-model.number="config[tpl][key]">
+                                        </template>
+                                        <template x-if="typeof value === 'string'">
+                                            <input type="text" class="ios-input" x-model="config[tpl][key]">
+                                        </template>
                                     </div>
                                 </template>
                             </template>
                         </div>
 
-                        <h4 class="text-[11px] text-[#8E8E93] uppercase tracking-wide ml-6 mb-2">Home Assistant
-                            Configurations (HA)</h4>
+                        <h4 class="text-[11px] text-[#8E8E93] uppercase tracking-wide ml-6 mb-2">Home Assistant (HA)</h4>
                         <div class="ios-group border-l-4 border-[#007AFF]">
                             <template x-for="(value, key) in config[tpl].ha" :key="key">
                                 <div class="ios-row">
-                                    <span class="ios-label text-sm text-gray-600"
-                                        x-text="key.replace(/_/g, ' ')"></span>
+                                    <span class="ios-label text-sm text-gray-600" x-text="key.replace(/_/g, ' ')"></span>
                                     <template x-if="typeof value === 'boolean'">
                                         <div class="relative inline-block w-12 mr-2 align-middle select-none">
                                             <input type="checkbox" x-model="config[tpl].ha[key]"
                                                 class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out" />
-                                            <label
-                                                class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                            <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
                                         </div>
                                     </template>
-                                    <template x-if="typeof value === 'number'"><input type="number" class="ios-input"
-                                            x-model.number="config[tpl].ha[key]"></template>
-                                    <template x-if="typeof value === 'string'"><input type="text" class="ios-input"
-                                            x-model="config[tpl].ha[key]"></template>
+                                    <template x-if="typeof value === 'number'">
+                                        <input type="number" class="ios-input" x-model.number="config[tpl].ha[key]">
+                                    </template>
+                                    <template x-if="typeof value === 'string'">
+                                        <input type="text" class="ios-input" x-model="config[tpl].ha[key]">
+                                    </template>
                                 </div>
                             </template>
                         </div>
@@ -222,14 +218,17 @@
 
             <div x-show="currentTab === 'channels'" x-cloak x-transition.opacity>
                 <div class="flex justify-between items-end mb-4 px-4">
-                    <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide">Active Channels (<span
-                            x-text="config.channels ? config.channels.length : 0"></span>)</h3>
-                    <div class="space-x-2">
-                        <button @click="initNewChannel('analog')"
-                            class="text-sm font-medium text-[#007AFF] hover:text-[#0056b3]">+ Analog</button>
-                        <button @click="initNewChannel('pio')"
-                            class="text-sm font-medium text-[#007AFF] hover:text-[#0056b3]">+ Digital</button>
-                    </div>
+                    <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide">Active Channels (<span x-text="config.channels ? config.channels.length : 0"></span>)</h3>
+                </div>
+
+                <!-- Dynamically spawn add buttons for every template detected -->
+                <div class="flex flex-wrap gap-2 px-4 mb-4">
+                    <template x-for="tpl in Object.keys(config).filter(k => k.endsWith('_template'))" :key="tpl">
+                        <button @click="initNewChannel(tpl)"
+                            class="px-3 py-1.5 bg-white border border-[#E5E5EA] rounded-full text-sm font-medium text-[#007AFF] hover:bg-blue-50 shadow-sm"
+                            x-text="'+ ' + tpl.replace('_template', '').toUpperCase()">
+                        </button>
+                    </template>
                 </div>
 
                 <div class="ios-group">
@@ -239,7 +238,7 @@
                                 <span class="font-medium text-[17px]"
                                     x-text="(channel.ha && channel.ha.name) ? channel.ha.name : 'Unnamed Channel'"></span>
                                 <span class="text-sm text-[#8E8E93]"
-                                    x-text="(channel.is_digital ? 'Digital I/O' : 'Analog Sensor') + ' • Pin ' + channel.pin"></span>
+                                    x-text="'Type ' + channel.type + ' • Position ' + index"></span>
                             </div>
                             <div class="flex items-center text-[#C7C7CC]">
                                 <span class="mr-3 text-sm"
@@ -281,7 +280,8 @@
                 <h4 class="text-[12px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Hardware Driver Options</h4>
                 <div class="ios-group mb-6">
                     <template x-for="(value, key) in activeEditorObject" :key="key">
-                        <template x-if="key !== 'ha'">
+                        <!-- Keep structural/hidden keys out of the interface -->
+                        <template x-if="key !== 'ha' && key !== '_template_key'">
                             <div class="ios-row">
                                 <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
 
@@ -289,18 +289,16 @@
                                     <div class="relative inline-block w-12 mr-2 align-middle select-none">
                                         <input type="checkbox" x-model="activeEditorObject[key]"
                                             class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10" />
-                                        <label
-                                            class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer"></label>
+                                        <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer"></label>
                                     </div>
                                 </template>
 
                                 <template x-if="typeof value === 'number'">
-                                    <input type="number" class="ios-input" x-model.number="activeEditorObject[key]">
+                                    <input type="number" class="ios-input" x-model.number="activeEditorObject[key]" @input="editedFields[key] = true">
                                 </template>
 
                                 <template x-if="typeof value === 'string'">
-                                    <input type="text" class="ios-input" x-model="activeEditorObject[key]"
-                                        @input="editedFields[key] = true">
+                                    <input type="text" class="ios-input" x-model="activeEditorObject[key]" @input="editedFields[key] = true">
                                 </template>
                             </div>
                         </template>
@@ -317,8 +315,7 @@
                                 <div class="relative inline-block w-12 mr-2 align-middle select-none">
                                     <input type="checkbox" x-model="activeEditorObject.ha[key]"
                                         class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10" />
-                                    <label
-                                        class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer"></label>
+                                    <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer"></label>
                                 </div>
                             </template>
 
@@ -361,56 +358,43 @@
                 editedFields: { ha: {} },
 
                 init() {
-                    // Fallback configuration layout mapping your schema targets
-                    this.config = {
-                        "version": 13,
-                        "position": 0,
-                        "device_id": "E3C3D7106A914008",
-                        "device_name": "",
-                        "model": "",
-                        "readonly": ["device_id", "version"],
-                        "wifi": { "ssid": "ROBO", "password": "*****", "network_name": "batmon" },
-                        "mqtt": { "broker": "rpi4b.lan", "user": "shawn", "password": "*****" },
-                        "analog_template": {
-                            "pin": 26, "enabled": true, "is_digital": false, "is_dirty": true, "ratio": 1, "offset": 0,
-                            "ha": { "name": "Analog %d", "platform": "sensor", "device_class": "voltage", "state_class": "measurement", "unit_of_measurement": "V", "suggested_display_precision": 2, "value_template": "{{value}}", "unique_id": "%s_channel_%d", "expire_after": 10, "retention": 0, "availability_topic": "%s/status", "payload_available": "online", "payload_not_available": "offline", "qos": 0 }
-                        },
-                        "pio_template": {
-                            "pin": 1, "enabled": true, "is_digital": true, "is_output": false, "is_dirty": true,
-                            "ha": { "name": "Digital %d", "platform": "switch", "device_class": "switch", "payload_off": "OFF", "payload_on": "ON", "state_off": "OFF", "state_on": "ON", "command_topic": "%s/pin/%d", "state_topic": "%s/pin/%d", "unique_id": "%s_channel_%d", "availability_topic": "%s/status", "payload_available": "online", "payload_not_available": "offline", "expire_after": 10, "retention": 0, "qos": 0 }
-                        },
-                        "channels": []
-                    };
-
                     fetch('/settings')
                         .then(r => r.json())
                         .then(data => {
-                            if (data && data.version) this.config = data;
+                            if (data && data.version) {
+                                this.config = data;
+                                if (!this.config.channels) this.config.channels = [];
+                            }
                         })
-                        .catch(e => console.log("Using default fallback structural JSON."));
+                        .catch(e => console.log("Failed to load configuration from Pico."));
 
-                    this.$watch('activeEditorObject.pin', (newVal) => {
-                        if (this.isEditing) {
-                            this.applyTemplates();
-                        }
-                    });
-                },
-
-                triggerDeviceTemplateUpdate() {
-                    if (this.isEditing) this.applyTemplates();
+                    // Re-apply string formatting if position or pin changes
+                    this.$watch('activeEditorObject.pin', () => { if (this.isEditing) this.applyTemplates(); });
+                    this.$watch('activeEditorObject.position', () => { if (this.isEditing) this.applyTemplates(); });
                 },
 
                 applyTemplates() {
-                    let typeTpl = this.activeEditorObject.is_digital ? this.config.pio_template : this.config.analog_template;
-                    let pin = this.activeEditorObject.pin || 0;
+                    let tplKey = this.activeEditorObject._template_key;
+                    
+                    // Fallback to type mapping if the JSON was generated purely in C without the hidden key
+                    if (!tplKey) {
+                        const typeMap = {0: 'pio_template', 1: 'analog_template', 2: 'ram_template', 3: 'flash_template', 4: 'temp_template', 5: 'uptime_template'};
+                        tplKey = typeMap[this.activeEditorObject.type] || 'pio_template';
+                    }
+
+                    let typeTpl = this.config[tplKey];
+                    if (!typeTpl) return;
+
+                    // Support tracking via physical pin OR array position mapping
+                    let formatVal = this.activeEditorObject.pin !== undefined ? this.activeEditorObject.pin : (this.editIndex === -1 ? this.config.channels.length : this.editIndex);
                     let devId = this.config.device_id || 'UNKNOWN';
 
-                    // Hydrate root string options if any exist
+                    // Hydrate root string options
                     for (let key in this.activeEditorObject) {
-                        if (key === 'ha' || this.editedFields[key]) continue;
+                        if (key === 'ha' || key === '_template_key' || this.editedFields[key]) continue;
                         let origStr = typeTpl[key];
                         if (typeof origStr === 'string' && (origStr.includes('%d') || origStr.includes('%s'))) {
-                            this.activeEditorObject[key] = origStr.replace(/%d/g, pin).replace(/%s/g, devId);
+                            this.activeEditorObject[key] = origStr.replace(/%d/g, formatVal).replace(/%s/g, devId);
                         }
                     }
 
@@ -420,21 +404,21 @@
                             if (this.editedFields.ha[key]) continue;
                             let origStr = typeTpl.ha[key];
                             if (typeof origStr === 'string' && (origStr.includes('%d') || origStr.includes('%s'))) {
-                                this.activeEditorObject.ha[key] = origStr.replace(/%d/g, pin).replace(/%s/g, devId);
+                                this.activeEditorObject.ha[key] = origStr.replace(/%d/g, formatVal).replace(/%s/g, devId);
                             }
                         }
                     }
                 },
 
-                initNewChannel(type) {
+                initNewChannel(tplKey) {
                     this.editIndex = -1;
                     this.editedFields = { ha: {} };
 
-                    let specTemplate = type === 'analog' ? this.config.analog_template : this.config.pio_template;
+                    let specTemplate = this.config[tplKey];
 
                     // Generate clean instance copy decoupled from the core global settings
                     let newChan = JSON.parse(JSON.stringify(specTemplate));
-                    newChan.is_digital = (type === 'pio');
+                    newChan._template_key = tplKey;
 
                     this.activeEditorObject = newChan;
                     this.applyTemplates();
@@ -447,7 +431,6 @@
 
                     let chanData = JSON.parse(JSON.stringify(this.config.channels[index]));
 
-                    // Populate tracker flags so existing text strings are preserved unless the pin shifts
                     for (let key in chanData) {
                         if (key === 'ha') {
                             for (let hk in chanData.ha) this.editedFields.ha[hk] = true;
@@ -455,16 +438,16 @@
                             this.editedFields[key] = true;
                         }
                     }
+                    
                     this.editedFields['pin'] = false;
+                    this.editedFields['position'] = false;
 
                     this.activeEditorObject = chanData;
                     this.isEditing = true;
                 },
 
                 saveChannel() {
-                    // Set the dirty flag to notify the back-end loop to reload configurations
                     this.config.is_dirty = true;
-
                     if (this.editIndex === -1) {
                         this.config.channels.push(this.activeEditorObject);
                     } else {
@@ -496,5 +479,4 @@
         }
     </script>
 </body>
-
 </html>

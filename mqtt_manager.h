@@ -28,6 +28,6 @@ typedef struct {
 bool mqtt_manager_init(MQTT_CLIENT_DATA_T *_state, cJSON *config);
 bool mqtt_manager_start(MQTT_CLIENT_DATA_T *state);
 void mqtt_manager_publish_raw(MQTT_CLIENT_DATA_T *_state, const char *topic, const char *payload, bool retain);
-void mqtt_manager_publish_state(MQTT_CLIENT_DATA_T *_state, cJSON *updates);
+void mqtt_manager_publish_state(MQTT_CLIENT_DATA_T *_state);
 
 #endif // MQTT_MANAGER_H
