@@ -135,24 +135,94 @@
                     </template>
                 </div>
 
-                <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Wi-Fi Network</h3>
-                <div class="ios-group mb-8" x-if="config.wifi">
-                    <template x-for="(value, key) in config.wifi">
+                <div class="flex justify-between items-end mb-2 pr-4">
+                    <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4">Wi-Fi Networks</h3>
+                    <button @click="addNetwork()" class="text-[#007AFF] text-[13px] font-medium hover:underline">
+                        + Add Network
+                    </button>
+                </div>
+                
+                <div x-show="config.wifi" class="mb-8">
+                    <!-- Global Wi-Fi Interval -->
+                    <div class="ios-group mb-6" x-show="config.wifi.interval_ms !== undefined">
                         <div class="ios-row">
-                            <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
-                            <input :type="key.toLowerCase().includes('password') ? 'password' : 'text'"
-                                class="ios-input" x-model="config.wifi[key]">
+                            <span class="ios-label">Interval (ms)</span>
+                            <input type="number" class="ios-input" x-model.number="config.wifi.interval_ms">
+                        </div>
+                    </div>
+
+                    <!-- Networks Array -->
+                    <template x-if="config.wifi.networks">
+                        <div>
+                            <template x-for="(network, index) in config.wifi.networks" :key="index">
+                                <div class="mb-6 relative">
+                                    <div class="flex justify-between items-center ml-4 mb-1 pr-4">
+                                        <h4 class="text-[11px] text-[#8E8E93] uppercase tracking-wide" x-text="'Network ' + (index + 1)"></h4>
+                                        <button @click="removeNetwork(index)" class="text-[11px] text-[#FF3B30] uppercase tracking-wide font-semibold hover:underline">
+                                            Delete
+                                        </button>
+                                    </div>
+                                    <div class="ios-group">
+                                        <template x-for="(value, key) in network" :key="key">
+                                            <div class="ios-row">
+                                                <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
+                                                <template x-if="typeof value === 'boolean'">
+                                                    <div class="relative inline-block w-12 mr-2 align-middle select-none">
+                                                        <input type="checkbox" x-model="network[key]"
+                                                            class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out" />
+                                                        <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                                    </div>
+                                                </template>
+                                                <template x-if="typeof value === 'number'">
+                                                    <input type="number" class="ios-input" x-model.number="network[key]">
+                                                </template>
+                                                <template x-if="typeof value === 'string'">
+                                                    <input :type="key.toLowerCase().includes('password') ? 'password' : 'text'"
+                                                        class="ios-input" x-model="network[key]">
+                                                </template>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                            <template x-if="config.wifi.networks.length === 0">
+                                <div class="p-6 text-center text-[#8E8E93] ios-group">No Wi-Fi networks configured. Click Add Network above.</div>
+                            </template>
                         </div>
                     </template>
                 </div>
 
                 <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">MQTT Broker</h3>
-                <div class="ios-group mb-8" x-if="config.mqtt">
-                    <template x-for="(value, key) in config.mqtt">
+                <div class="ios-group mb-8" x-show="config.mqtt">
+                    <template x-for="(value, key) in config.mqtt" :key="key">
                         <div class="ios-row">
                             <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
-                            <input :type="key.toLowerCase().includes('password') ? 'password' : 'text'"
-                                class="ios-input" x-model="config.mqtt[key]">
+                            <template x-if="typeof value === 'boolean'">
+                                <div class="relative inline-block w-12 mr-2 align-middle select-none">
+                                    <input type="checkbox" x-model="config.mqtt[key]"
+                                        class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 border-[#E5E5EA] appearance-none cursor-pointer z-10 transition-transform duration-200 ease-in-out" />
+                                    <label class="toggle-label block overflow-hidden h-6 rounded-full bg-[#E5E5EA] cursor-pointer transition-colors duration-200 ease-in-out"></label>
+                                </div>
+                            </template>
+                            <template x-if="typeof value === 'number'">
+                                <input type="number" class="ios-input" x-model.number="config.mqtt[key]">
+                            </template>
+                            <template x-if="typeof value === 'string'">
+                                <input :type="key.toLowerCase().includes('password') ? 'password' : 'text'"
+                                    class="ios-input" x-model="config.mqtt[key]">
+                            </template>
+                        </div>
+                    </template>
+                </div>
+
+                <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide ml-4 mb-2">Web Server</h3>
+                <div class="ios-group mb-8" x-show="config.web">
+                    <template x-for="(value, key) in config.web" :key="key">
+                        <div class="ios-row">
+                            <span class="ios-label" x-text="key.replace(/_/g, ' ')"></span>
+                            <template x-if="typeof value === 'number'">
+                                <input type="number" class="ios-input" x-model.number="config.web[key]">
+                            </template>
                         </div>
                     </template>
                 </div>
@@ -162,9 +232,8 @@
                 <p class="text-sm text-[#8E8E93] ml-4 mb-6">Modifying these templates will change the default values
                     applied when creating new channels.</p>
                 
-                <!-- Dynamically discover templates from JSON keys -->
                 <template x-for="tpl in Object.keys(config).filter(k => k.endsWith('_template'))" :key="tpl">
-                    <div class="mb-8" x-if="config[tpl]">
+                    <div class="mb-8" x-show="config[tpl]">
                         <h3 class="text-[15px] font-semibold text-black uppercase tracking-wide ml-4 mb-2"
                             x-text="tpl.replace('_', ' ')"></h3>
 
@@ -221,7 +290,6 @@
                     <h3 class="text-[13px] text-[#6E6E73] uppercase tracking-wide">Active Channels (<span x-text="config.channels ? config.channels.length : 0"></span>)</h3>
                 </div>
 
-                <!-- Dynamically spawn add buttons for every template detected -->
                 <div class="flex flex-wrap gap-2 px-4 mb-4">
                     <template x-for="tpl in Object.keys(config).filter(k => k.endsWith('_template'))" :key="tpl">
                         <button @click="initNewChannel(tpl)"
@@ -373,10 +441,30 @@
                     this.$watch('activeEditorObject.position', () => { if (this.isEditing) this.applyTemplates(); });
                 },
 
+                addNetwork() {
+                    if (!this.config.wifi) this.config.wifi = {};
+                    if (!this.config.wifi.networks) this.config.wifi.networks = [];
+                    
+                    this.config.wifi.networks.push({
+                        enabled: true,
+                        ssid: "",
+                        password: "",
+                        network_name: "batmon",
+                        timeout_seconds: 20
+                    });
+                    this.config.is_dirty = true;
+                },
+
+                removeNetwork(index) {
+                    if (confirm("Are you sure you want to remove this Wi-Fi network?")) {
+                        this.config.wifi.networks.splice(index, 1);
+                        this.config.is_dirty = true;
+                    }
+                },
+
                 applyTemplates() {
                     let tplKey = this.activeEditorObject._template_key;
                     
-                    // Fallback to type mapping if the JSON was generated purely in C without the hidden key
                     if (!tplKey) {
                         const typeMap = {0: 'pio_template', 1: 'analog_template', 2: 'ram_template', 3: 'flash_template', 4: 'temp_template', 5: 'uptime_template'};
                         tplKey = typeMap[this.activeEditorObject.type] || 'pio_template';
@@ -385,11 +473,9 @@
                     let typeTpl = this.config[tplKey];
                     if (!typeTpl) return;
 
-                    // Support tracking via physical pin OR array position mapping
                     let formatVal = this.activeEditorObject.pin !== undefined ? this.activeEditorObject.pin : (this.editIndex === -1 ? this.config.channels.length : this.editIndex);
                     let devId = this.config.device_id || 'UNKNOWN';
 
-                    // Hydrate root string options
                     for (let key in this.activeEditorObject) {
                         if (key === 'ha' || key === '_template_key' || this.editedFields[key]) continue;
                         let origStr = typeTpl[key];
@@ -398,7 +484,6 @@
                         }
                     }
 
-                    // Deep-hydrate configurations sitting inside the nested "ha" block
                     if (this.activeEditorObject.ha && typeTpl.ha) {
                         for (let key in this.activeEditorObject.ha) {
                             if (this.editedFields.ha[key]) continue;
@@ -416,7 +501,6 @@
 
                     let specTemplate = this.config[tplKey];
 
-                    // Generate clean instance copy decoupled from the core global settings
                     let newChan = JSON.parse(JSON.stringify(specTemplate));
                     newChan._template_key = tplKey;
 

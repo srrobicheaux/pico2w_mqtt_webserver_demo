@@ -172,8 +172,6 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
         return ERR_OK;
     }
 
-    // maybe this should be p->len
-    // tcp_recved(tpcb, p->len);
     tcp_recved(tpcb, p->tot_len);
 
     char *req = (char *)p->payload;
@@ -237,7 +235,8 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
         tcp_write(tpcb, header, strlen(header), TCP_WRITE_FLAG_COPY);
         tcp_write(tpcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
         tcp_output(tpcb);
-        watchdog_enable(30, 1);
+        watchdog_enable(10, 1);
+        sleep_ms(20);
     }
 
     // save config
@@ -358,14 +357,7 @@ static err_t http_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t
             if (channel)
             {
                 cJSON *tg = cJSON_GetObjectItem(channel, "toggle");
-                if (!tg)
-                {
-                    tg = cJSON_AddBoolToObject(channel, "toggle", 1);
-                }
-                else
-                {
-                    cJSON_SetBoolValue(tg, 1);
-                }
+                cJSON_SetBoolValue(tg, 1);
 
                 printf("Requesting channel %d toggle\n", index);
                 resp = "{\"success\": 1, \"MESSAGE\": \"Channel toggle requested.\"}\n\n";
@@ -523,6 +515,11 @@ void webserver_update_config(cJSON *new_config)
 
 void start_webserver(cJSON *config)
 {
+    if (s_webserver_config)
+    {
+        s_webserver_config = config;
+        return; // Already running, just update config
+    }
     s_webserver_config = config;
 
     struct tcp_pcb *pcb = tcp_new();

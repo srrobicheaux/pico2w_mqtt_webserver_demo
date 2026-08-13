@@ -41,33 +41,33 @@ void mqtt_manager_publish_raw(MQTT_CLIENT_DATA_T *_state, const char *topic, con
 }
 
 // Looks inside the nested "ha" block for state topics
-static const char *lookup_state_topic(cJSON *channels, int pin, char *fallback_buf, size_t fallback_sz, const char *dev_id)
-{
-    cJSON *ch = NULL;
-    cJSON_ArrayForEach(ch, channels)
-    {
-        cJSON *pin_obj = cJSON_GetObjectItem(ch, "pin");
-        if (pin_obj && pin_obj->valueint == pin)
-        {
-            cJSON *ha_node = cJSON_GetObjectItem(ch, "ha");
-            if (ha_node)
-            {
-                cJSON *top_obj = cJSON_GetObjectItem(ha_node, "state_topic");
-                if (top_obj && top_obj->valuestring)
-                {
-                    if (strchr(top_obj->valuestring, '%'))
-                    {
-                        snprintf(fallback_buf, fallback_sz, top_obj->valuestring, dev_id, pin);
-                        return fallback_buf;
-                    }
-                    return top_obj->valuestring;
-                }
-            }
-        }
-    }
-    snprintf(fallback_buf, fallback_sz, "%s/pin/%d/status", dev_id, pin);
-    return fallback_buf;
-}
+// static const char *lookup_state_topic(cJSON *channels, int pin, char *fallback_buf, size_t fallback_sz, const char *dev_id)
+// {
+//     cJSON *ch = NULL;
+//     cJSON_ArrayForEach(ch, channels)
+//     {
+//         cJSON *pin_obj = cJSON_GetObjectItem(ch, "pin");
+//         if (pin_obj && pin_obj->valueint == pin)
+//         {
+//             cJSON *ha_node = cJSON_GetObjectItem(ch, "ha");
+//             if (ha_node)
+//             {
+//                 cJSON *top_obj = cJSON_GetObjectItem(ha_node, "state_topic");
+//                 if (top_obj && top_obj->valuestring)
+//                 {
+//                     if (strchr(top_obj->valuestring, '%'))
+//                     {
+//                         snprintf(fallback_buf, fallback_sz, top_obj->valuestring, dev_id, pin);
+//                         return fallback_buf;
+//                     }
+//                     return top_obj->valuestring;
+//                 }
+//             }
+//         }
+//     }
+//     snprintf(fallback_buf, fallback_sz, "%s/pin/%d/status", dev_id, pin);
+//     return fallback_buf;
+// }
 
 void mqtt_manager_publish_state(MQTT_CLIENT_DATA_T *_state)
 {
@@ -112,23 +112,18 @@ void mqtt_manager_publish_state(MQTT_CLIENT_DATA_T *_state)
     }
 }
 
-static void handle_inbound_gpio(MQTT_CLIENT_DATA_T *_state, int pin, const char *command)
-{
-    char *resp;
-    //    printf("Inbound MQTT Control -> Pin %d: %s\n", pin, command);
-    bool set_high = (lwip_stricmp(command, "on") == 0 || strcmp(command, "1") == 0 || lwip_stricmp(command, "ON") == 0);
+// static void handle_inbound_gpio(MQTT_CLIENT_DATA_T *_state, int channel, const char *command)
+// {
+//     char *resp;
+//     //    printf("Inbound MQTT Control -> Pin %d: %s\n", pin, command);
+//     bool set_high = (lwip_stricmp(command, "on") == 0 || strcmp(command, "1") == 0 || lwip_stricmp(command, "ON") == 0);
 
-    //    printf("Todo: set settings value and then mark channel dirty.\n");
-    //    toggle_pin(pin);
-
-    // char fallback[128];
-    // cJSON *dev_id_obj = cJSON_GetObjectItem(_state->config_root, "device_id");
-    // const char *dev_id = (dev_id_obj && dev_id_obj->valuestring) ? dev_id_obj->valuestring : "batmon";
-    // cJSON *channels = cJSON_GetObjectItem(_state->config_root, "channels");
-
-    // const char *topic = lookup_state_topic(channels, pin, fallback, sizeof(fallback), dev_id);
-    // mqtt_manager_publish_raw(_state, topic, get_pin(pin) ? "ON" : "OFF", false);
-}
+//     cJSON * channel_ptr = cJSON_GetArrayItem(cJSON_GetObjectItem(_state->config_root, "channels"),channel);
+//     if (channel_ptr){
+//         cJSON *tg = cJSON_GetObjectItem(channel_ptr, "toggle");
+//         cJSON_SetBoolValue(tg, 1);
+//     }
+// }
 
 // Safely format specific strings based on whether they contain %s, %d, or both
 static void safe_hydrate_key(cJSON *ha_node, const char *key, const char *dev_id, int pin)
@@ -310,7 +305,6 @@ static void ha_publish_discovery(MQTT_CLIENT_DATA_T *_state)
         }
 
         cJSON_Delete(disc_payload);
-        cyw43_arch_poll();
     }
 }
 
@@ -464,6 +458,14 @@ bool mqtt_manager_start(MQTT_CLIENT_DATA_T *state)
     if (!state || !state->config_root)
         return false;
 
+    // *** CRITICAL AP-MODE GUARD ***
+    // Do not attempt to resolve DNS or start MQTT if the Wi-Fi station interface is down.
+    // This prevents lwIP panics when running in Access Point mode.
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP)
+    {
+        return false; 
+    }
+
     // Already connected? Nothing to do.
     if (state->status == MQTT_CONNECT_ACCEPTED)
         return true;
@@ -471,7 +473,6 @@ bool mqtt_manager_start(MQTT_CLIENT_DATA_T *state)
     // Connection attempt in progress? Let it ride.
     if (state->is_connecting)
     {
-        cyw43_arch_poll();
         return false;
     }
 

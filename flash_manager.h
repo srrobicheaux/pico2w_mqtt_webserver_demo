@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define VERSION 30
+#define VERSION 31
 
 //FYI - 640 sectors remain after FLASH_SETTINGS_OFFSET
 #define FLASH_SETTINGS_OFFSET (1536 * 1024UL)
@@ -14,7 +14,7 @@
 
 extern cJSON *g_config;
 extern cJSON *g_pending_config;
-extern volatile bool g_config_dirty;
+extern volatile bool reconfig_due;
 
 void load_configuration(void);
 int load_flash_buffer(char *json_str, size_t length);

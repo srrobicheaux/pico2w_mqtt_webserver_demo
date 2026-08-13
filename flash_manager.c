@@ -11,7 +11,7 @@
 
 cJSON *g_config = NULL;
 cJSON *g_pending_config = NULL;
-volatile bool g_config_dirty = false;
+volatile bool reconfig_due = false;
 
 static uint8_t flash_ram_buffer[FLASH_SETTING_SIZE] __attribute__((aligned(4)));
 
@@ -63,7 +63,7 @@ int load_flash_buffer(char *json_str, size_t length)
             cJSON_Delete(g_pending_config);
         }
         g_pending_config = new_values;
-        g_config_dirty = true;
+        reconfig_due = true;
         return 0;
     }
     else

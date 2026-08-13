@@ -5,19 +5,29 @@
     "device_id": "?",
     "model": "Pico 2W",
     "wifi": {
-        "ssid": "",
-        "password": "",
-        "network_name": "batmon",
-        "update_interval": 50
+        "networks": [
+            {
+                "enabled": true,
+                "ssid": "",
+                "password": "",
+                "network_name": "batmon",
+                "timeout_seconds": 20
+            }
+        ],
+        "interval_ms": 20000
     },
     "mqtt": {
+        "enabled": true,
         "device_name": "Pico Dashboard",
         "broker": "homeassistant.lan",
         "user": "pi",
         "password": "raspberry",
-        "update_interval": 2000
+        "interval_ms": 2000
     },
-        "pio_template": {
+    "web": {
+        "interval_ms": 100
+    },
+    "pio_template": {
         "type": 0,
         "pin": 1,
         "value": 0,

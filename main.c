@@ -13,35 +13,48 @@
 #include "mqtt_manager.h"
 #include "malloc.h"
 
+// single repeating timer callback for MQTT and web updates
+bool timer_due_callback(struct repeating_timer *t)
+{
+    // Safely cast the void pointer back to a volatile boolean pointer
+    volatile bool *flag = (volatile bool *)t->user_data;
+    *flag = true;
+
+    return true;
+}
+
 void check_button(cJSON *root)
 {
     if (!poll_bootsel_button())
         return;
 
     watchdog_disable();
-    // if more than ~5s held, reset settings
-    absolute_time_t LongPress = get_absolute_time() + 5000000; //~5seconds
+    // Safely calculate the 5-second future timestamp
+    absolute_time_t LongPress = delayed_by_us(get_absolute_time(), 5000000);
 
     while (poll_bootsel_button())
-        ;
+    {
+        tight_loop_contents(); // Prevents the compiler from aggressively optimizing the empty loop
+    }
+
     if (time_reached(LongPress))
     {
         printf("Button held long enough, resetting settings.\n");
         // create a version mismatch to factory reset
         cJSON_SetNumberValue(cJSON_GetObjectItem(root, "version"), 0);
-
+        printf("loading the default hasnt been implemented correctly.\n");
         flash_save_settings(root);
     }
     else
     {
         printf("Short Button press, rebooting only.\n");
     }
-    watchdog_reboot(0, 0, 1500);
+    watchdog_enable(5, 0);
+    sleep_ms(10);
 }
 
-bool timer_callback_webupdate_channels(repeating_timer_t *mst)
+bool webupdate_channels(cJSON *channels)
 {
-    cJSON *channels = (cJSON *)mst->user_data;
     if (!channels)
         return true;
 
@@ -82,120 +95,174 @@ bool timer_callback_webupdate_channels(repeating_timer_t *mst)
     return true;
 }
 
-bool timer_callback_mqttupdate_channels(repeating_timer_t *mst)
+bool mqtt_update(MQTT_CLIENT_DATA_T *system_state)
 {
-    MQTT_CLIENT_DATA_T *system_state = (MQTT_CLIENT_DATA_T *)mst->user_data;
-    //    cJSON *channels = cJSON_GetObjectItem(system_state->config_root, "channels");
-
     cyw43_arch_lwip_begin();
     mqtt_manager_publish_state(system_state);
     cyw43_arch_lwip_end();
     return true;
 }
 
+bool initalization(cJSON *g_config, MQTT_CLIENT_DATA_T *system_state)
+{
+
+    // 2. ALWAYS initialize memory to clear stack garbage and set config_root
+
+    // 3. ONLY start MQTT and bind network ops if we are on the station network
+    if (wifi_poll() == WIFI_CONNECTED)
+    {
+        printf("MQTT Manager initialized.\n");
+        return true;
+    }
+    else
+    {
+        printf("Not connected to Wifi so MQTT bypassed.\n");
+        return false;
+    }
+}
+
 extern char __StackLimit, __bss_end__;
 
+// Todo List (Backlog):
 
-//Todo List (Backlog):
-//Allow multiple WiFI networks to be stored and cycled through on connection failure
-//Add a "reset to factory defaults" button on the webserver page
-//Factory reset if button held for 5 seconds on boot
-//Monitor network disconnects and attempt to reconnect automatically
-//If nework connection isnt successful after 30 seconds, Enter AP mode.
-//If AP mode without configuration for 5 minutes, reboot and try connections again.
-//Log analog values to flash and allow download of CSV file from webserver
-//seperate MQTT and Webserver into their own threads to avoid blocking each other
-//seperate Analog and Diagnostic channels into their own website areas
-//fix network naming to be more user friendly (currently uses Picow for SSID and network name)
+// Log analog values to flash and allow download of CSV file from webserver
+
+// 1. Define the struct holding your data and a function pointer for the callback
+typedef struct
+{
+    struct repeating_timer timer;
+    volatile bool due;
+    int32_t interval_ms;
+
+    // Function pointer matching the Pico SDK repeating timer signature
+    bool (*callback)(struct repeating_timer *t);
+} timed_boolean_t;
+
+// 2. Write a single shared callback function that handles any instance
+static bool generic_timer_callback(struct repeating_timer *t)
+{
+    // The user_data pointer points directly to the 'due' boolean inside our struct
+    volatile bool *flag = (volatile bool *)t->user_data;
+    *flag = true;
+    return true; // Keep repeating
+}
+
+// 3. Create an initializer function to wire and start it cleanly
+void timed_boolean_init(timed_boolean_t *tb, int32_t interval_ms)
+{
+    tb->interval_ms = interval_ms;
+    tb->due = false;
+    tb->callback = generic_timer_callback;
+
+    // Register the timer, passing the address of 'due' as user_data
+    add_repeating_timer_ms(
+        tb->interval_ms,
+        tb->callback,
+        (void *)&tb->due,
+        &tb->timer);
+}
+
+// Instantiate your grouped timers
+static timed_boolean_t mqtt_timer;
+static timed_boolean_t web_timer;
+static timed_boolean_t wifi_timer;
 
 int main()
 {
+    MQTT_CLIENT_DATA_T system_state = {0}; // Ensure this is initialized with zeroes
+    volatile bool initization_due = true;
+    wifi_timer.due = true;
+
     stdio_init_all();
+    sleep_ms(3000);
     load_configuration(); // Populates g_config
+    cyw43_arch_init();
 
-    cJSON *channels = cJSON_GetObjectItem(g_config, "channels");
-    cJSON *wifi = cJSON_GetObjectItem(g_config, "wifi");
-    cJSON *mqtt = cJSON_GetObjectItem(g_config, "mqtt");
-
-    bool on_wifi = wifi_init(
-        cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "ssid")),
-        cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "password")),
-        cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "network_name")));
-
-    watchdog_enable(180000, 0);
-    start_webserver(g_config);
-
-    MQTT_CLIENT_DATA_T system_state;
-    mqtt_manager_init(&system_state, g_config);
-    io_init_all(channels);
-    mqtt_manager_start(&system_state);
-
-    static repeating_timer_t mst_mqttupdate_channels;
-    add_repeating_timer_ms(2000, timer_callback_mqttupdate_channels, &system_state, &mst_mqttupdate_channels);
-
-    static repeating_timer_t mst_webupdate_channels;
-    add_repeating_timer_ms(500, timer_callback_webupdate_channels, channels, &mst_webupdate_channels);
-
+    watchdog_enable(180000, 1);
+    wifi_mode mode = WIFI_AP;
     while (true)
     {
+        // 2. Handle Wi-Fi connections independently of the Watchdog
+        if (wifi_timer.due)
+        {
+            if (mode == WIFI_AP || mode == WIFI_ERROR)
+            {
+                cJSON *networks = cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "networks");
+                if (networks)
+                {
+                    printf("Looking for enabled Wifi...\n");
+                    start_wifi_scan(networks);
+                }
+            }
+            wifi_timer.due = false;
+        }
+        mode = wifi_poll();
+
+        if (mode == WIFI_SCANED || mode == WIFI_DISCONNECTED)
+        {
+            printf("Access Point Start\n");
+            AP_Start();
+        }
+
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
-        best_effort_wfe_or_timeout(make_timeout_time_ms(100));
-
-        if (g_config_dirty)
+        if (initization_due && (mode == WIFI_AP || mode == WIFI_CONNECTED))
         {
-            // 1. Pause repeating timers so ISR callbacks do not access freed JSON
-            cancel_repeating_timer(&mst_webupdate_channels);
-            cancel_repeating_timer(&mst_mqttupdate_channels);
+            printf("Initializing\n");
+            io_init_all(cJSON_GetObjectItem(g_config, "channels"));
+            mqtt_manager_init(&system_state, g_config);
 
+            start_webserver(g_config);
+            webserver_send_sse_update("data: {\"MESSAGE\":\"System initialized. Refresh to load settings.\"}\n\n");
+
+            timed_boolean_init(&wifi_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "interval_ms")) : 120000);
+            timed_boolean_init(&web_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "web"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "web"), "interval_ms")) : 100);
+            timed_boolean_init(&mqtt_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "mqtt"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "mqtt"), "interval_ms")) : 2000);
+
+            printf("(Re)initializing subsystems...\n");
+            initization_due = false;
+        }
+
+        if (!initization_due)
+        {
+            channel_updates(cJSON_GetObjectItem(g_config, "channels"));
+        }
+        if (mqtt_timer.due)
+        {
+            // start if not already started exit if connected
+            if (mqtt_manager_start(&system_state))
+            {
+                mqtt_update(&system_state);
+            };
+            mqtt_timer.due = false;
+        }
+
+        if (web_timer.due)
+        {
+            webupdate_channels(cJSON_GetObjectItem(g_config, "channels"));
+            web_timer.due = false;
+        }
+
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+
+        if (reconfig_due)
+        {
             if (g_pending_config)
             {
-                // 2. Commit new configuration to physical flash
                 flash_save_settings(g_pending_config);
 
-                // 3. Swap root pointers safely
                 if (g_config)
                     cJSON_Delete(g_config);
                 g_config = g_pending_config;
                 g_pending_config = NULL;
-
-                // 4. Update local sub-node pointers
-                channels = cJSON_GetObjectItem(g_config, "channels");
-                wifi = cJSON_GetObjectItem(g_config, "wifi");
-                mqtt = cJSON_GetObjectItem(g_config, "mqtt");
-
-                // 4b. Pass the new pointer to the webserver!
-                webserver_update_config(g_config);
             }
 
-            g_config_dirty = false;
-
-            webserver_send_sse_update("data: {\"MESSAGE\":\"Settings have changed. Refresh to load them.\"}\n\n");
-            printf("Config change detected. Re-initializing subsystems...\n");
-
-            // 5. Re-initialize IO and MQTT with fresh pointers
-            io_init_all(channels);
-
-            if (system_state.mqtt_client_inst)
-            {
-                cyw43_arch_lwip_begin();
-                mqtt_disconnect(system_state.mqtt_client_inst);
-                cyw43_arch_lwip_end();
-            }
-
-            mqtt_manager_init(&system_state, g_config);
-            mqtt_manager_start(&system_state);
-
-            // 6. Restart hardware timers with updated target pointers
-            add_repeating_timer_ms(2000, timer_callback_mqttupdate_channels, &system_state, &mst_mqttupdate_channels);
-            add_repeating_timer_ms(500, timer_callback_webupdate_channels, channels, &mst_webupdate_channels);
+            reconfig_due = false;
+            initization_due = true;
         }
-        wifi_poll();
-        check_button(g_config);
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-
-        channel_updates(channels);
+        // 1. Feed the Watchdog continuously as long as the loop isn't locked up
         watchdog_update();
+        check_button(g_config);
     }
     return 0;
 }

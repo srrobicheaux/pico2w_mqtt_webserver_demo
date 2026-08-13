@@ -9,6 +9,9 @@
 #define DHCP_PORT_CLIENT 68
 
 #include "lwip/ip_addr.h"
+#include "cJSON.h"
+
+wifi_mode mode;
 
 typedef struct dhcp_entry_t
 {
@@ -287,65 +290,205 @@ void dns_server_init()
     printf("DNS Redirector initialized (Port 53)\n");
 }
 
-void wifi_poll()
+wifi_mode wifi_poll()
 {
     cyw43_arch_poll();
+    if (mode == WIFI_SCANNING)
+    {
+        if (!cyw43_wifi_scan_active(&cyw43_state))
+        {
+            mode = WIFI_SCANED;
+        }
+    }
+    if (mode == WIFI_CONNECTING)
+    {
+        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+        {
+            mode = WIFI_CONNECTED;
+        }
+    }
+    if (mode == WIFI_CONNECTED)
+    {
+        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP)
+        {
+            mode = WIFI_DISCONNECTED;
+        }
+    }
+    if (mode == WIFI_AP_STARTING)
+    {
+        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_AP) == CYW43_LINK_UP)
+        {
+            mode = WIFI_AP;
+        }
+    }
+    return mode;
 }
 
-bool wifi_init(const char *ssid, const char *password, const char *network_name)
+void wifi_Connect(cJSON *wifi)
 {
-    if (cyw43_arch_init())
+    int error = PICO_ERROR_NONE;
+    mode = WIFI_CONNECTING;
+    if (cyw43_arch_async_context() == NULL && cyw43_arch_init())
     {
+        cyw43_arch_deinit();
+        mode = WIFI_ERROR;
+
         printf("WiFi init failed\n\n");
-        return false;
+        return;
+    }
+    if (!wifi)
+    {
+        mode = WIFI_ERROR;
+        return;
+    }
+
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+    {
+        mode = WIFI_CONNECTED;
+        return;
+    }
+
+    char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "ssid"));
+    char *password = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "password"));
+    char *network_name = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "network_name"));
+    if (ssid == NULL)
+    {
+        mode = WIFI_SCANNING;
+        return; // SSID is required to connect to a network
     }
     if (strlen(network_name) == 0)
     {
-        network_name = "batmon";
-    }
+        network_name = "batmon"; // Default network name if not provided
+    };
+
+    printf("%s is connecting to SSID %s...\n", network_name, ssid);
+
+    cyw43_arch_enable_sta_mode();
+
     cyw43_arch_lwip_begin();
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+    netif_set_hostname(n, network_name);
 
-    //error if no SSID provided, otherwise try connecting to WiFi and fall back to AP mode if it fails after multiple attempts
-    int error= (strlen(ssid) == 0);
-    if (!error)
+    stop_dhcp_server();
+
+    if (password == NULL || strlen(password) == 0)
     {
-        struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
-        netif_set_hostname(n, network_name);
-
-        cyw43_arch_enable_sta_mode();
-        printf("SSID %s:", ssid);
-        int timeout = 15;
-        error = PICO_ERROR_TIMEOUT;
-        while (error != PICO_ERROR_NONE && timeout < 60)
-        {
-            watchdog_update();
-            printf("(%ds timeout).\n\t", timeout);
-            error = cyw43_arch_wifi_connect_timeout_ms(ssid, password, CYW43_AUTH_WPA3_WPA2_AES_PSK, timeout * 1000);
-            if(error == PICO_ERROR_TIMEOUT){
-                timeout = timeout * 2;
-            }
-            else {
-                timeout = 61; // if not a timeout then exit out of loop
-            }
-        }
-    }
-    if (error != PICO_ERROR_NONE)
-    {
-        printf("Starting AP: %s (Open)\n", network_name);
-        cyw43_arch_enable_ap_mode(network_name, NULL, CYW43_AUTH_OPEN);
-
-        start_dhcp_server();
-        dns_server_init();
+        // Use WPA2 as it is the most stable for the cyw43 driver
+        cyw43_arch_wifi_connect_async(ssid, password, CYW43_AUTH_OPEN);
     }
     else
     {
-        printf("\nConnected @ http://%s or ", network_name);
-        // Disable power management for better responsiveness
-        cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
+        // Use WPA2 as it is the most stable for the cyw43 driver
+        cyw43_arch_wifi_connect_async(ssid, password, CYW43_AUTH_WPA2_AES_PSK);
+    }
+    cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
+    cyw43_arch_lwip_end();
+    printf("\nConnected @ http://%s\n", network_name);
+
+    return;
+}
+cJSON *_networks;
+
+static int scan_result(void *env, const cyw43_ev_scan_result_t *result)
+{
+    if (result)
+    {
+        printf("ssid: %-32s rssi: %4d chan: %3d mac: %02x:%02x:%02x:%02x:%02x:%02x sec: %u\n",
+               result->ssid, result->rssi, result->channel,
+               result->bssid[0], result->bssid[1], result->bssid[2], result->bssid[3], result->bssid[4], result->bssid[5],
+               result->auth_mode);
+
+        cJSON *wifi_item;
+        cJSON_ArrayForEach(wifi_item, _networks)
+        {
+            char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(wifi_item, "ssid"));
+            bool enabled = cJSON_IsTrue(cJSON_GetObjectItem(wifi_item, "enabled"));
+            while (wifi_poll() == WIFI_CONNECTING)
+            {
+                sleep_ms(10);
+            }
+            if (enabled && wifi_poll() != WIFI_CONNECTED && strlen(ssid) > 0 && strcmp(ssid, result->ssid) == 0)
+            {
+                mode = WIFI_CONNECTING;
+                printf("Found network: %s, RSSI: %d\n", result->ssid, result->rssi);
+                wifi_Connect(wifi_item);
+            }
+        }
     }
 
-printf("WiFi initialization complete\n");
+    return 0;
+}
 
-    cyw43_arch_lwip_end();
-    return (error == PICO_ERROR_NONE);
+void AP_Start()
+{
+    if (cyw43_arch_async_context() == NULL && cyw43_arch_init())
+    {
+        printf("AP:Wifi Init Error\n");
+        cyw43_arch_deinit();
+        mode = WIFI_ERROR;
+        return;
+    }
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+    {
+        mode = WIFI_CONNECTED;
+        return;
+    }
+
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_AP) == CYW43_LINK_UP)
+    {
+        mode = WIFI_AP;
+        return;
+    }
+    mode = WIFI_AP_STARTING;
+
+    char *network_name = "picomon";
+    printf("Starting AP: http://%s/config (Open)\n", network_name);
+    // Ensure STA mode is fully disabled before standing up the AP to prevent lwIP conflicts
+    cyw43_arch_disable_sta_mode();
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+    netif_set_hostname(n, network_name);
+    cyw43_arch_enable_ap_mode(network_name, NULL, CYW43_AUTH_OPEN);
+
+    start_dhcp_server();
+    dns_server_init();
+    printf("AP initialization complete\n");
+    mode = WIFI_AP;
+    return;
+}
+
+bool start_wifi_scan(cJSON *networks)
+{
+    if (networks == NULL)
+    {
+        return false;
+    }
+    _networks = networks;
+    mode = WIFI_SCANNING;
+    if (cyw43_arch_async_context() == NULL && cyw43_arch_init())
+    {
+        cyw43_arch_deinit();
+        printf("SCAN:Wifi Init Error\n");
+
+        mode = WIFI_ERROR;
+        return false;
+    }
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
+    {
+        mode = WIFI_CONNECTED;
+        return true;
+    }
+
+    cyw43_arch_enable_sta_mode();
+    cyw43_wifi_scan_options_t scan_options = {0};
+    int err = cyw43_wifi_scan(&cyw43_state, &scan_options, NULL, scan_result);
+    if (err == 0)
+    {
+        printf("\nPerforming wifi scan\n");
+        return true;
+    }
+    else
+    {
+        printf("Failed to start scan: %d\n", err);
+        return false;
+    }
 }

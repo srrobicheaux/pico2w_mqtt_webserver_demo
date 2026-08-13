@@ -108,6 +108,13 @@ void io_init_all(cJSON *channels)
         int type = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "type"));
         uint pin = -type;
 
+        cJSON *ptr_value = cJSON_GetObjectItem(item, "value");
+        if (!ptr_value)
+        {
+            ptr_value = cJSON_AddNumberToObject(item, "value", 0);
+            printf("Added missing 'value' field to channel type %d\n", type);
+        }
+
         if (type == DIGITAL || type == ANALOG)
         {
             cJSON *pin_obj = cJSON_GetObjectItem(item, "pin");
@@ -115,6 +122,12 @@ void io_init_all(cJSON *channels)
 
             if (type == DIGITAL)
             {
+                cJSON *tg = cJSON_GetObjectItem(item, "toggle");
+                if (!tg)
+                {
+                    tg = cJSON_AddBoolToObject(item, "toggle", 0);
+                }
+
                 if (pin > 3)
                 {
                     gpio_init(pin);
@@ -168,11 +181,6 @@ bool channel_updates(cJSON *channels)
         channel_type_t type = (channel_type_t)cJSON_GetNumberValue(cJSON_GetObjectItem(item, "type"));
 
         cJSON *ptr_value = cJSON_GetObjectItem(item, "value");
-        if (!ptr_value)
-        {
-            ptr_value = cJSON_AddNumberToObject(item, "value", 0);
-            printf("Added missing 'value' field to channel type %d\n", type);
-        }
 
         switch (type)
         {

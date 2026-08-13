@@ -195,6 +195,9 @@
                 <div class="dot" id="conn-dot"></div>
                 <span id="conn-text">Connecting...</span>
             </div>
+            <div class="card_text">Version: <span id="sys-ver" class="sys-val">--</span></div>
+            <div class="card_text">Serial#: <span id="dev-id" class="sys-val">--</span></div>
+
             <a href="/config" class="config-btn">Settings</a>
         </label>
 
@@ -213,13 +216,6 @@
                     <canvas id="voltageChart"></canvas>
                 </div>
             </div>
-        </div>
-
-        <!-- System Footer Stats -->
-        <div id="system-gauges" class="card" style="flex-flow:row; justify-content: space-evenly;">
-            <div class="card_text">Version: <span id="sys-ver" class="sys-val">--</span></div>
-            <div class="card_text">ID: <span id="dev-id" class="sys-val">--</span></div>
-            <div class="card_text">Uptime: <span id="dev-uptime" class="sys-val">--</span></div>
         </div>
     </div>
 
@@ -284,6 +280,7 @@
                     data.channels.forEach((ch, index) => {
                         const chName = (ch.ha && ch.ha.name) ? ch.ha.name : `Channel ${index}`;
                         const unit = (ch.ha && ch.ha.unit_of_measurement) ? ch.ha.unit_of_measurement : '';
+                        const hide_diag = (ch.type != 1 ? true: false );
 
                         if (ch.type === 0) { 
                             // DIGITAL CHANNEL (type = 0)
@@ -316,12 +313,13 @@
                                 </div>
                                 <div><span class="card-value" id="val-${index}">--.--</span><span class="unit">${unit}</span></div>
                             </div>`;
-
+                            
                             chart.data.datasets.push({
                                 label: chName,
                                 borderColor: color,
                                 backgroundColor: color,
                                 data: Array(MAX_POINTS).fill(null),
+                                hidden: hide_diag,
                                 borderWidth: 3, pointRadius: 0, tension: 0.3
                             });
                             colorIdx++;
