@@ -103,24 +103,6 @@ bool mqtt_update(MQTT_CLIENT_DATA_T *system_state)
     return true;
 }
 
-bool initalization(cJSON *g_config, MQTT_CLIENT_DATA_T *system_state)
-{
-
-    // 2. ALWAYS initialize memory to clear stack garbage and set config_root
-
-    // 3. ONLY start MQTT and bind network ops if we are on the station network
-    if (wifi_poll() == WIFI_CONNECTED)
-    {
-        printf("MQTT Manager initialized.\n");
-        return true;
-    }
-    else
-    {
-        printf("Not connected to Wifi so MQTT bypassed.\n");
-        return false;
-    }
-}
-
 extern char __StackLimit, __bss_end__;
 
 // Todo List (Backlog):
@@ -174,92 +156,72 @@ int main()
     wifi_timer.due = true;
 
     stdio_init_all();
-    sleep_ms(3000);
-    load_configuration(); // Populates g_config
-    cyw43_arch_init();
-
+    //    sleep_ms(3000);
     watchdog_enable(180000, 1);
-    wifi_mode mode = WIFI_AP;
+    wifi_mode mode = WIFI_NOT_INITIALIZE;
+
+    load_configuration(); // Populates g_config
+
+    cJSON *networks = cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "networks");
+
     while (true)
     {
-        // 2. Handle Wi-Fi connections independently of the Watchdog
-        if (wifi_timer.due)
+        mode = wifi_poll(mode, networks);
+        if (mode == WIFI_AP || mode == WIFI_CONNECTED)
         {
-            if (mode == WIFI_AP || mode == WIFI_ERROR)
+
+            if (initization_due)
             {
-                cJSON *networks = cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "networks");
-                if (networks)
-                {
-                    printf("Looking for enabled Wifi...\n");
-                    start_wifi_scan(networks);
-                }
+                printf("(Re)initializing subsystems...\n");
+                io_init_all(cJSON_GetObjectItem(g_config, "channels"));
+                mqtt_manager_init(&system_state, g_config);
+
+                start_webserver(g_config);
+                webserver_send_sse_update("data: {\"MESSAGE\":\"System initialized. Refresh to load settings.\"}\n\n");
+
+                timed_boolean_init(&wifi_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "interval_ms")) : 120000);
+                timed_boolean_init(&web_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "web"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "web"), "interval_ms")) : 100);
+                timed_boolean_init(&mqtt_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "mqtt"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "mqtt"), "interval_ms")) : 2000);
+
+                initization_due = false;
             }
-            wifi_timer.due = false;
-        }
-        mode = wifi_poll();
-
-        if (mode == WIFI_SCANED || mode == WIFI_DISCONNECTED)
-        {
-            printf("Access Point Start\n");
-            AP_Start();
-        }
-
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-
-        if (initization_due && (mode == WIFI_AP || mode == WIFI_CONNECTED))
-        {
-            printf("Initializing\n");
-            io_init_all(cJSON_GetObjectItem(g_config, "channels"));
-            mqtt_manager_init(&system_state, g_config);
-
-            start_webserver(g_config);
-            webserver_send_sse_update("data: {\"MESSAGE\":\"System initialized. Refresh to load settings.\"}\n\n");
-
-            timed_boolean_init(&wifi_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "interval_ms")) : 120000);
-            timed_boolean_init(&web_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "web"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "web"), "interval_ms")) : 100);
-            timed_boolean_init(&mqtt_timer, cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "mqtt"), "interval_ms") ? cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "mqtt"), "interval_ms")) : 2000);
-
-            printf("(Re)initializing subsystems...\n");
-            initization_due = false;
-        }
-
-        if (!initization_due)
-        {
             channel_updates(cJSON_GetObjectItem(g_config, "channels"));
-        }
-        if (mqtt_timer.due)
-        {
-            // start if not already started exit if connected
-            if (mqtt_manager_start(&system_state))
+            if (mqtt_timer.due && !initization_due)
             {
-                mqtt_update(&system_state);
-            };
-            mqtt_timer.due = false;
-        }
-
-        if (web_timer.due)
-        {
-            webupdate_channels(cJSON_GetObjectItem(g_config, "channels"));
-            web_timer.due = false;
-        }
-
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-
-        if (reconfig_due)
-        {
-            if (g_pending_config)
-            {
-                flash_save_settings(g_pending_config);
-
-                if (g_config)
-                    cJSON_Delete(g_config);
-                g_config = g_pending_config;
-                g_pending_config = NULL;
+                // start if not already started exit if connected
+                if (mqtt_manager_start(&system_state))
+                {
+                    mqtt_update(&system_state);
+                };
+                mqtt_timer.due = false;
             }
 
-            reconfig_due = false;
-            initization_due = true;
+            if (web_timer.due)
+            {
+                webupdate_channels(cJSON_GetObjectItem(g_config, "channels"));
+
+                web_timer.due = false;
+            }
+
+            if (reconfig_due)
+            {
+                if (g_pending_config)
+                {
+                    flash_save_settings(g_pending_config);
+
+                    if (g_config)
+                        cJSON_Delete(g_config);
+                    g_config = g_pending_config;
+                    networks = cJSON_GetObjectItem(cJSON_GetObjectItem(g_config, "wifi"), "networks");
+
+                    g_pending_config = NULL;
+                }
+
+                reconfig_due = false;
+                initization_due = true;
+            }
         }
+ 
         // 1. Feed the Watchdog continuously as long as the loop isn't locked up
         watchdog_update();
         check_button(g_config);

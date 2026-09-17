@@ -15,7 +15,7 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.2.0)
+set(sdkVersion 2.3.0)
 set(toolchainVersion 14_2_Rel1)
 set(picotoolVersion 2.2.0-a4)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
@@ -28,13 +28,13 @@ set(PICO_BOARD pico2_w CACHE STRING "Board type")
 cmake_minimum_required(VERSION 3.13)
 include(pico_sdk_import.cmake)
 
-project(HA_pico C CXX ASM)
+project(ellip C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
-add_executable(HA_pico
+add_executable(${PROJECT_NAME}
     networking.c
     main.c
     io_manager.c
@@ -45,11 +45,11 @@ add_executable(HA_pico
 )
 
 # Pull in lwip configuration
-target_include_directories(HA_pico PRIVATE ${CMAKE_CURRENT_LIST_DIR})
-target_include_directories(HA_pico PRIVATE build/${CMAKE_CURRENT_BINARY_DIR})   # Important for build/ headers
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE build/${CMAKE_CURRENT_BINARY_DIR})   # Important for build/ headers
 
 # Link the required libraries
-target_link_libraries(HA_pico
+target_link_libraries(${PROJECT_NAME}
     pico_stdlib
     pico_cyw43_arch_lwip_poll
     hardware_adc
@@ -59,8 +59,14 @@ target_link_libraries(HA_pico
     pico_lwip_mqtt
 )
 
-# Enable USB printing instead of UART (optional but good for debugging)
-pico_enable_stdio_usb(HA_pico 1)
-pico_enable_stdio_uart(HA_pico 0)
+# Pass the project name to the C compiler as a string
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    CYW43_ENABLE_WPA3=1
+    PROJECT_NAME_STRING="${PROJECT_NAME}"
+)
 
-pico_add_extra_outputs(HA_pico)
+# Enable USB printing instead of UART (optional but good for debugging)
+pico_enable_stdio_usb(${PROJECT_NAME} 1)
+pico_enable_stdio_uart(${PROJECT_NAME} 0)
+
+pico_add_extra_outputs(${PROJECT_NAME})

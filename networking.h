@@ -4,6 +4,7 @@
 
 typedef enum 
 {
+    WIFI_NOT_INITIALIZE = -4,
     WIFI_SCANNING = 0,
     WIFI_SCANED = 1,
     WIFI_CONNECTING = 2,
@@ -15,10 +16,8 @@ typedef enum
     WIFI_ERROR = -3
 } wifi_mode;
 
-
-void wifi_Connect(cJSON *wifi);
-wifi_mode wifi_poll();
-bool start_wifi_scan(cJSON *networks) ;
-void AP_Start();
+//void wifi_Connect(cJSON *wifi);
+wifi_mode wifi_poll(wifi_mode mode, cJSON *networks);
+int32_t get_wifi_rssi(void);
 
 #endif // NETWORKING_H

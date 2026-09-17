@@ -11,7 +11,8 @@ typedef enum channel_type
     RAM = 2,
     FLASH = 3,
     TEMP = 4,
-    UPTIME = 5
+    UPTIME = 5,
+    RSSI = 6
 } channel_type_t;
 
 //bool toggle_pin(int pin);

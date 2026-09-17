@@ -536,8 +536,10 @@ void start_webserver(cJSON *config)
     tcp_bind(pcb, IP_ADDR_ANY, PORT);
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, http_accept_cb);
+    char network_name[32];
 
-    printf("http://%s:80\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+    printf("Webserver started at http://%s or http://%s:80\n",n->hostname, ip4addr_ntoa(netif_ip4_addr(netif_default)));
 }
 
 // Iterates through active connections and pushes SSE payload

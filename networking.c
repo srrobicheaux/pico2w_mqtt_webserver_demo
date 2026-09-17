@@ -11,8 +11,6 @@
 #include "lwip/ip_addr.h"
 #include "cJSON.h"
 
-wifi_mode mode;
-
 typedef struct dhcp_entry_t
 {
     uint8_t mac[6];
@@ -198,8 +196,15 @@ static void start_dhcp_server(void)
 
 static void stop_dhcp_server(void)
 {
-    dhcp_server_deinit(&dhcp_srv);
-    printf("DHCP server stopped\n");
+    if (dhcp_pcb == NULL)
+    {
+        return;
+    }
+    else
+    {
+        dhcp_server_deinit(&dhcp_srv);
+        printf("DHCP server stopped\n");
+    }
 }
 
 static struct udp_pcb *dns_pcb;
@@ -290,158 +295,126 @@ void dns_server_init()
     printf("DNS Redirector initialized (Port 53)\n");
 }
 
-wifi_mode wifi_poll()
+wifi_mode wifi_Connect(cJSON *_networks)
 {
-    cyw43_arch_poll();
-    if (mode == WIFI_SCANNING)
-    {
-        if (!cyw43_wifi_scan_active(&cyw43_state))
-        {
-            mode = WIFI_SCANED;
-        }
-    }
-    if (mode == WIFI_CONNECTING)
-    {
-        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
-        {
-            mode = WIFI_CONNECTED;
-        }
-    }
-    if (mode == WIFI_CONNECTED)
-    {
-        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP)
-        {
-            mode = WIFI_DISCONNECTED;
-        }
-    }
-    if (mode == WIFI_AP_STARTING)
-    {
-        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_AP) == CYW43_LINK_UP)
-        {
-            mode = WIFI_AP;
-        }
-    }
-    return mode;
-}
-
-void wifi_Connect(cJSON *wifi)
-{
-    int error = PICO_ERROR_NONE;
-    mode = WIFI_CONNECTING;
-    if (cyw43_arch_async_context() == NULL && cyw43_arch_init())
-    {
-        cyw43_arch_deinit();
-        mode = WIFI_ERROR;
-
-        printf("WiFi init failed\n\n");
-        return;
-    }
-    if (!wifi)
-    {
-        mode = WIFI_ERROR;
-        return;
-    }
-
-    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
-    {
-        mode = WIFI_CONNECTED;
-        return;
-    }
-
-    char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "ssid"));
-    char *password = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "password"));
-    char *network_name = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "network_name"));
-    if (ssid == NULL)
-    {
-        mode = WIFI_SCANNING;
-        return; // SSID is required to connect to a network
-    }
-    if (strlen(network_name) == 0)
-    {
-        network_name = "batmon"; // Default network name if not provided
-    };
-
-    printf("%s is connecting to SSID %s...\n", network_name, ssid);
-
+    stop_dhcp_server();
     cyw43_arch_enable_sta_mode();
 
-    cyw43_arch_lwip_begin();
-    struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
-    netif_set_hostname(n, network_name);
-
-    stop_dhcp_server();
-
-    if (password == NULL || strlen(password) == 0)
+    cJSON *wifi;
+    cJSON_ArrayForEach(wifi, _networks)
     {
-        // Use WPA2 as it is the most stable for the cyw43 driver
-        cyw43_arch_wifi_connect_async(ssid, password, CYW43_AUTH_OPEN);
-    }
-    else
-    {
-        // Use WPA2 as it is the most stable for the cyw43 driver
-        cyw43_arch_wifi_connect_async(ssid, password, CYW43_AUTH_WPA2_AES_PSK);
-    }
-    cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
-    cyw43_arch_lwip_end();
-    printf("\nConnected @ http://%s\n", network_name);
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(wifi, "enabled")))
+        {
+            break;
+        }
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(wifi, "found")))
+        {
+            break;
+        }
+        int error = PICO_ERROR_NONE;
 
-    return;
+        char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "ssid"));
+        char *password = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "password"));
+        char *network_name = cJSON_GetStringValue(cJSON_GetObjectItem(wifi, "network_name"));
+        if (ssid == NULL)
+        {
+            break; // SSID is required to connect to a network
+        }
+        if (strlen(network_name) == 0)
+        {
+            network_name = "batmon"; // Default network name if not provided
+        };
+
+        struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+        netif_set_hostname(n, network_name);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        printf("Connectting %s to %s ", network_name, ssid);
+        error = cyw43_arch_wifi_connect_blocking(ssid, password, CYW43_AUTH_WPA2_AES_PSK);
+        // error = cyw43_arch_wifi_connect_async(ssid, password, CYW43_AUTH_WPA2_AES_PSK);
+
+        if (error != PICO_ERROR_NONE)
+        {
+            printf(" ... failed with error code: %d\n", error);
+            break; // COnitnue others
+        }
+
+        return WIFI_CONNECTING;
+    }
+
+    return WIFI_SCANED;
 }
-cJSON *_networks;
+
+// Add these above wifi_poll so it knows they exist
+bool target_wifi = false;
 
 static int scan_result(void *env, const cyw43_ev_scan_result_t *result)
 {
+    cJSON *_networks = (cJSON *)env;
+
     if (result)
     {
-        printf("ssid: %-32s rssi: %4d chan: %3d mac: %02x:%02x:%02x:%02x:%02x:%02x sec: %u\n",
-               result->ssid, result->rssi, result->channel,
-               result->bssid[0], result->bssid[1], result->bssid[2], result->bssid[3], result->bssid[4], result->bssid[5],
-               result->auth_mode);
+        bool new_wifi = true;
 
         cJSON *wifi_item;
         cJSON_ArrayForEach(wifi_item, _networks)
         {
             char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(wifi_item, "ssid"));
             bool enabled = cJSON_IsTrue(cJSON_GetObjectItem(wifi_item, "enabled"));
-            while (wifi_poll() == WIFI_CONNECTING)
+            cJSON *fnd = cJSON_GetObjectItem(wifi_item, "found");
+            if (!fnd)
             {
-                sleep_ms(10);
+                fnd = cJSON_AddBoolToObject(wifi_item, "found", 0);
             }
-            if (enabled && wifi_poll() != WIFI_CONNECTED && strlen(ssid) > 0 && strcmp(ssid, result->ssid) == 0)
+            cJSON_SetIntValue(fnd, 0);
+
+            // If we find a match and haven't already selected one
+            if (ssid && strlen(ssid) > 0 && strcmp(ssid, (char *)result->ssid) == 0)
             {
-                mode = WIFI_CONNECTING;
-                printf("Found network: %s, RSSI: %d\n", result->ssid, result->rssi);
-                wifi_Connect(wifi_item);
+                if (enabled)
+                {
+                    //                    printf("Found target network: %s, RSSI: %d, Mode: %d\n", result->ssid, result->rssi, result->auth_mode);
+                    // Save the target, but DO NOT connect here.
+                    cJSON_SetBoolValue(fnd, 1);
+
+                    target_wifi = true;
+
+                    cJSON *auth = cJSON_GetObjectItem(wifi_item, "auth_mode");
+                    if (!auth)
+                    {
+                        auth = cJSON_AddNumberToObject(wifi_item, "auth_mode", result->auth_mode);
+                    }
+                    cJSON_SetIntValue(auth, result->auth_mode);
+                    cJSON *rssi = cJSON_GetObjectItem(wifi_item, "rssi");
+                    if (!rssi)
+                    {
+                        rssi = cJSON_AddNumberToObject(wifi_item, "rssi", result->rssi);
+                    }
+                    cJSON_SetIntValue(rssi, result->rssi);
+                }
+                new_wifi = false;
             }
         }
-    }
+        printf("%s%-14s\t|\t%d\t|\t%d\t\t|\t%02X:%02X:%02X:%02X:%02X:%02X\t|\t%d\n", new_wifi ? "*" : "", result->ssid, result->rssi, result->auth_mode,result->bssid[0], result->bssid[1], result->bssid[2], result->bssid[3], result->bssid[4], result->bssid[5], result->channel);
+        fflush(stdout);
 
+        if (new_wifi)
+        {
+            cJSON *new_wifi = cJSON_CreateObject();
+            cJSON_AddItemToObject(new_wifi, "ssid", cJSON_CreateString((char *)result->ssid));
+            cJSON_AddItemToObject(new_wifi, "auth_mode", cJSON_CreateNumber(result->auth_mode));
+            cJSON_AddItemToObject(new_wifi, "rssi", cJSON_CreateNumber(result->rssi));
+            cJSON_AddItemToObject(new_wifi, "enabled", cJSON_CreateBool(0));
+            cJSON_AddItemToObject(new_wifi, "found", cJSON_CreateBool(1));
+            cJSON_AddItemToObject(new_wifi, "password", cJSON_CreateString((char *)"NotSet"));
+            cJSON_AddItemToObject(_networks, result->ssid, new_wifi);
+        }
+    }
     return 0;
 }
 
-void AP_Start()
+wifi_mode AP_Start()
 {
-    if (cyw43_arch_async_context() == NULL && cyw43_arch_init())
-    {
-        printf("AP:Wifi Init Error\n");
-        cyw43_arch_deinit();
-        mode = WIFI_ERROR;
-        return;
-    }
-    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
-    {
-        mode = WIFI_CONNECTED;
-        return;
-    }
-
-    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_AP) == CYW43_LINK_UP)
-    {
-        mode = WIFI_AP;
-        return;
-    }
-    mode = WIFI_AP_STARTING;
-
-    char *network_name = "picomon";
+    char *network_name = PROJECT_NAME_STRING;
     printf("Starting AP: http://%s/config (Open)\n", network_name);
     // Ensure STA mode is fully disabled before standing up the AP to prevent lwIP conflicts
     cyw43_arch_disable_sta_mode();
@@ -452,43 +425,155 @@ void AP_Start()
     start_dhcp_server();
     dns_server_init();
     printf("AP initialization complete\n");
-    mode = WIFI_AP;
-    return;
+    return WIFI_AP_STARTING;
 }
 
-bool start_wifi_scan(cJSON *networks)
+wifi_mode start_wifi_scan(cJSON *networks)
 {
-    if (networks == NULL)
-    {
-        return false;
-    }
-    _networks = networks;
-    mode = WIFI_SCANNING;
-    if (cyw43_arch_async_context() == NULL && cyw43_arch_init())
-    {
-        cyw43_arch_deinit();
-        printf("SCAN:Wifi Init Error\n");
-
-        mode = WIFI_ERROR;
-        return false;
-    }
-    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP)
-    {
-        mode = WIFI_CONNECTED;
-        return true;
-    }
-
     cyw43_arch_enable_sta_mode();
+    target_wifi = false;
     cyw43_wifi_scan_options_t scan_options = {0};
-    int err = cyw43_wifi_scan(&cyw43_state, &scan_options, NULL, scan_result);
+    int err = cyw43_wifi_scan(&cyw43_state, &scan_options, networks, scan_result);
     if (err == 0)
     {
-        printf("\nPerforming wifi scan\n");
-        return true;
+        printf("SSID\t\t|\tRSSI\t|\tAuth Mode\t|\t\tBSSID\t\t|\tChannel\n");
+        return WIFI_SCANNING;
     }
     else
     {
         printf("Failed to start scan: %d\n", err);
-        return false;
+        return WIFI_ERROR;
+    }
+}
+
+/**
+ * @brief Gets the current Wi-Fi RSSI (signal strength) in dBm.
+ * @return int32_t RSSI value (e.g., -50 to -80), or 0 if not connected/error.
+ */
+int32_t get_wifi_rssi(void)
+{
+    int32_t rssi = 0;
+
+    // cyw43_wifi_get_rssi takes the driver state (&cyw43_state)
+    // and a pointer to store the resulting integer.
+    int err = cyw43_wifi_get_rssi(&cyw43_state, &rssi);
+
+    if (err != 0)
+    {
+        // Return 0 or an error flag if the call failed or chip isn't ready
+        return 0;
+    }
+
+    return rssi;
+}
+
+wifi_mode wifi_poll(wifi_mode current_mode, cJSON *networks)
+{
+    switch (current_mode)
+    {
+    case WIFI_NOT_INITIALIZE:
+        if (cyw43_arch_init() == 0)
+        {
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            return WIFI_DISCONNECTED;
+        }
+        printf("WiFi init failed\n");
+        return WIFI_ERROR;
+
+    case WIFI_ERROR:
+        if (cyw43_arch_async_context() != NULL)
+        {
+            cyw43_arch_deinit();
+        }
+        return WIFI_NOT_INITIALIZE;
+
+        case WIFI_DISCONNECTED:
+        if (!networks)
+        {
+            printf("No enabled Wifi networks.\n");
+            return WIFI_SCANED;
+        }
+
+        printf("Looking for enabled Wifi...\n");
+        return start_wifi_scan(networks);
+
+    case WIFI_SCANNING:
+        cyw43_arch_poll();
+
+        if (cyw43_wifi_scan_active(&cyw43_state))
+        {
+            return WIFI_SCANNING;
+        }
+        else
+        {
+            if (target_wifi == true)
+            {
+                return WIFI_FOUND;
+            }
+            return WIFI_SCANED;
+        }
+    case WIFI_FOUND:
+//        cyw43_arch_poll();
+        printf("* - Discovered network temporarily stored (not enabled) in configuration.\n");
+        return wifi_Connect(networks);
+
+    case WIFI_CONNECTING:
+        cyw43_arch_poll();
+//        cyw43_arch_wait_for_work_until(make_timeout_time_ms(50));
+
+        int link_status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+        // link status | Meaning -------------------|-------- CYW43_LINK_DOWN | Wifi down CYW43_LINK_JOIN | Connected to wifi CYW43_LINK_NOIP | Connected to wifi, but no IP address CYW43_LINK_UP | Connect to wifi with an IP address CYW43_LINK_FAIL | Connection failed CYW43_LINK_NONET | No matching SSID found (could be out of range, or down) CYW43_LINK_BADAUTH | Authenticatation failure
+
+        switch (link_status)
+        {
+        case CYW43_LINK_DOWN:
+        case CYW43_LINK_JOIN:
+        case CYW43_LINK_NOIP:
+            return WIFI_CONNECTING;
+        case CYW43_LINK_UP:
+            printf(" ... done in %d seconds\n", time_us_32() / 1000000);
+            fflush(stdout);
+            sleep_ms(20);
+
+            return WIFI_CONNECTED;
+        case CYW43_LINK_FAIL:
+        case CYW43_LINK_NONET:
+        case CYW43_LINK_BADAUTH:
+            return WIFI_DISCONNECTED;
+        default:
+            return WIFI_DISCONNECTED;
+        }
+
+    case WIFI_CONNECTED:
+        cyw43_arch_poll();
+        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP)
+        {
+            return WIFI_DISCONNECTED;
+        }
+        return WIFI_CONNECTED;
+
+    case WIFI_SCANED:
+        printf("Access Point Start\n");
+        return AP_Start();
+
+
+    case WIFI_AP_STARTING:
+        cyw43_arch_poll();
+
+        if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_AP) == CYW43_LINK_UP)
+        {
+            return WIFI_AP;
+        }
+        return WIFI_AP_STARTING;
+
+    case WIFI_AP:
+        cyw43_arch_poll();
+
+        // Stable state, do nothing
+        // probably need a timer to retry connection after a while if no clients are connected
+        return WIFI_AP;
+
+    default:
+        return current_mode;
     }
 }

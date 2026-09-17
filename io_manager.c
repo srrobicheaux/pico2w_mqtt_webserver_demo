@@ -9,6 +9,7 @@
 #include "hardware/structs/sio.h"
 #include "malloc.h"
 #include "pico/cyw43_arch.h"
+#include "networking.h"
 
 float ChipTemp(void)
 {
@@ -101,7 +102,7 @@ void io_init_all(cJSON *channels)
         return;
 
     cJSON *item = NULL;
-    printf("Initializing pins:\nPin#\tType\tName\t\tDirection\n");
+    printf("Pin#\t|\tType\t|\tName\t\t\t|\tDirection\n");
 
     cJSON_ArrayForEach(item, channels)
     {
@@ -158,13 +159,14 @@ void io_init_all(cJSON *channels)
             }
         }
 
-        printf("%d\t%d\t%s\t\t%s\n", pin, type,
+        printf("%d\t|\t%d\t|\t%-20s\t|\t%s\n", pin, type,
                cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(item, "ha"), "name")),
                type == DIGITAL ? "Digital" : type == ANALOG ? "Analog"
                                          : type == RAM      ? "RAM"
                                          : type == FLASH    ? "Flash"
                                          : type == TEMP     ? "Temp"
                                          : type == UPTIME   ? "Uptime"
+                                         : type == RSSI     ? "RSSI"
                                                             : "Unknown");
     }
 }
@@ -238,6 +240,10 @@ bool channel_updates(cJSON *channels)
 
         case UPTIME:
             cJSON_SetNumberValue(ptr_value, time_us_64() / 1000000.0f);
+            break;
+
+        case RSSI:
+            cJSON_SetNumberValue(ptr_value, get_wifi_rssi());
             break;
 
         default:

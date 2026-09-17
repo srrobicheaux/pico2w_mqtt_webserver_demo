@@ -387,7 +387,7 @@ static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection
 
     if (status == MQTT_CONNECT_ACCEPTED)
     {
-        printf("MQTT Session Bound.\n");
+        printf(".. MQTT Session Bound.\n");
         sub_unsub_topics(_state, true);
 
         char buf[128];
@@ -398,7 +398,7 @@ static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection
     }
     else
     {
-        printf("MQTT Connection Dropped/Refused: %d\n", status);
+        printf(".. MQTT Connection Dropped/Refused: %d\n", status);
     }
 }
 
@@ -492,7 +492,7 @@ bool mqtt_manager_start(MQTT_CLIENT_DATA_T *state)
 
     // Set guard flag to handle async execution safely
     state->is_connecting = true;
-    printf("Resolving MQTT Broker: %s\n", broker_obj->valuestring);
+    printf("Resolving MQTT Broker: %s ", broker_obj->valuestring);
 
     cyw43_arch_lwip_begin();
     err_t err = dns_gethostbyname(broker_obj->valuestring, &state->mqtt_server_address, dns_found_cb, state);

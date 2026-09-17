@@ -94,10 +94,10 @@ ELF_FILE=$(ls -t *.elf 2>/dev/null | head -n1)
 
 if [ -n "$UF2_FILE" ]; then
     echo "Flashing: $UF2_FILE"
-    sudo ~/.pico-sdk/picotool/2.2.0-a4/picotool/picotool load "$UF2_FILE" -fx
+    sudo /usr/local/bin/picotool load "$UF2_FILE" -fx
 elif [ -n "$ELF_FILE" ]; then
     echo "Flashing: $ELF_FILE"
-    sudo ~/.pico-sdk/picotool/2.2.0-a4/picotool/picotool load "$ELF_FILE" -fx
+    sudo /usr/local/bin/picotool load "$ELF_FILE" -fx
 else
     echo "Error: No .uf2 or .elf file found in build/"
     exit 1
